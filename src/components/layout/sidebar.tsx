@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,9 +13,12 @@ import {
   Settings,
   Sun,
   Moon,
+  Loader2,
   type LucideIcon,
 } from "lucide-react";
 import { useTheme } from "@/hooks/use-theme";
+import { getIndexingStatus, onIndexingCompleted } from "@/lib/tauri";
+import type { IndexingServiceStatus } from "@/types";
 
 export type NavSection = "search" | "folders" | "indexing" | "settings";
 
@@ -38,6 +42,26 @@ const navItems: NavItem[] = [
 
 export function Sidebar({ activeSection, onSectionChange }: SidebarProps) {
   const { resolvedTheme, setTheme } = useTheme();
+  const [indexingStatus, setIndexingStatus] = useState<IndexingServiceStatus | null>(null);
+
+  useEffect(() => {
+    getIndexingStatus().then(setIndexingStatus).catch(() => {});
+    let unlisten: (() => void) | undefined;
+    onIndexingCompleted(() => {
+      getIndexingStatus().then(setIndexingStatus).catch(() => {});
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    const interval = setInterval(() => {
+      getIndexingStatus().then(setIndexingStatus).catch(() => {});
+    }, 4000);
+
+    return () => {
+      if (unlisten) unlisten();
+      clearInterval(interval);
+    };
+  }, []);
 
   return (
     <aside className="flex h-full w-12 flex-col items-center border-r border-sidebar-border bg-sidebar py-2">
@@ -70,6 +94,29 @@ export function Sidebar({ activeSection, onSectionChange }: SidebarProps) {
       </nav>
 
       <div className="flex flex-col items-center gap-1 pb-1">
+        {/* Subtle Background Indexing Indicator */}
+        {indexingStatus?.stats.pending ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="flex h-8 w-8 items-center justify-center cursor-default">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              Indexing {indexingStatus.stats.pending} screenshot(s)...
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="flex h-8 w-8 items-center justify-center cursor-default">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="right">All screenshots indexed</TooltipContent>
+          </Tooltip>
+        )}
+
         <Tooltip>
           <TooltipTrigger asChild>
             <Button

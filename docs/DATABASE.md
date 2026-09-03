@@ -87,42 +87,57 @@ Constraints / invariants:
 - changing content must invalidate derived search/embedding data
 - deleting the original file must remove or mark unavailable the corresponding searchable record
 
-### index_jobs
+### index_jobs (Implemented in Phase 2 — Migration v3)
 
-Potential future persistent queue:
+Durable, crash-resilient local job queue for filesystem changes and OCR indexing:
 
-```text
-id
-screenshot_id
-job_type
-status
-attempts
-last_error_code
-last_error_message
-available_at
-lease_until
-created_at
-updated_at
-completed_at
+```sql
+CREATE TABLE IF NOT EXISTS index_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+    screenshot_id INTEGER REFERENCES screenshots(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    job_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    dedupe_key TEXT NOT NULL UNIQUE,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    available_at TEXT NOT NULL DEFAULT (datetime('now')),
+    lease_until TEXT,
+    last_error_code TEXT,
+    last_error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_index_jobs_status_available 
+    ON index_jobs(status, available_at);
+CREATE INDEX IF NOT EXISTS idx_index_jobs_folder_id 
+    ON index_jobs(folder_id);
+CREATE INDEX IF NOT EXISTS idx_index_jobs_screenshot_id 
+    ON index_jobs(screenshot_id);
 ```
 
-Possible job types:
+Job types implemented:
+- `UPSERT_SCREENSHOT`: Discovered/modified screenshots to hash, inspect, and OCR.
+- `DELETE_SCREENSHOT`: Verified deleted files to remove from screenshots and FTS5.
 
-```text
-OCR
-THUMBNAIL
-TEXT_EMBEDDING
-VISUAL_EMBEDDING
-```
-
-Possible statuses:
-
-```text
-PENDING
-PROCESSING
-SUCCEEDED
-FAILED
-CANCELLED
+Atomic single-statement claim query (zero race condition):
+```sql
+UPDATE index_jobs
+SET status = 'PROCESSING',
+    lease_until = datetime('now', '+' || ?1 || ' seconds'),
+    attempts = attempts + 1,
+    updated_at = datetime('now')
+WHERE id = (
+    SELECT id FROM index_jobs
+    WHERE status = 'PENDING'
+      AND available_at <= datetime('now')
+    ORDER BY available_at ASC, id ASC
+    LIMIT 1
+)
+RETURNING id, folder_id, screenshot_id, path, job_type, status, dedupe_key, attempts, max_attempts, available_at, lease_until, last_error_code, last_error_message, created_at, updated_at, completed_at;
 ```
 
 ### screenshot_embeddings

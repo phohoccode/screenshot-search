@@ -278,10 +278,14 @@ export function FoldersPage() {
                           <span className="truncate text-sm font-medium text-foreground">
                             {folderName}
                           </span>
+                          {folder.enabled && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 px-2 py-0.5 text-[11px] font-medium border border-emerald-500/20">
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              Watching
+                            </span>
+                          )}
                           <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                            {folder.screenshotCount.toLocaleString()} images
-                            {folder.ocrSucceededCount > 0 &&
-                              ` (${folder.ocrSucceededCount.toLocaleString()} OCR indexed)`}
+                            {folder.screenshotCount.toLocaleString()} screenshots · {folder.ocrSucceededCount.toLocaleString()} searchable
                           </span>
                         </div>
                         <p

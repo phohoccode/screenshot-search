@@ -5,6 +5,7 @@ pub mod filesystem;
 pub mod indexing;
 pub mod ocr;
 pub mod search;
+pub mod watcher;
 
 use tauri::Manager;
 
@@ -78,6 +79,10 @@ pub fn run() {
             commands::get_ocr_stats,
             commands::get_ocr_engine_info,
             commands::cancel_ocr_indexing,
+            commands::get_indexing_status,
+            commands::pause_indexing,
+            commands::resume_indexing,
+            commands::retry_failed_index_jobs,
             commands::search_screenshots,
             commands::get_screenshot,
             commands::get_screenshot_image,
@@ -103,8 +108,35 @@ pub fn run() {
                 let _ = db::screenshots::recover_stale_processing(&conn);
             }
 
+            #[cfg(target_os = "windows")]
+            let ocr_engine: std::sync::Arc<dyn ocr::engine::OcrEngine> =
+                std::sync::Arc::new(ocr::windows::WindowsMediaOcrEngine::new());
+            #[cfg(not(target_os = "windows"))]
+            let ocr_engine: std::sync::Arc<dyn ocr::engine::OcrEngine> =
+                std::sync::Arc::new(ocr::mock::MockOcrEngine::new());
+
+            let watcher_manager = watcher::WatcherManager::new(database.clone());
+            let indexing_service = indexing::service::IndexingService::new(
+                database.clone(),
+                ocr_engine,
+                watcher_manager,
+            );
+
+            let app_handle = app.handle().clone();
+            indexing_service.start(Some(std::sync::Arc::new(move |job_id, path| {
+                use tauri::Emitter;
+                let _ = app_handle.emit(
+                    "indexing_job_completed",
+                    serde_json::json!({
+                        "jobId": job_id,
+                        "path": path,
+                    }),
+                );
+            })));
+
             app.manage(database);
             app.manage(ocr::OcrManager::new());
+            app.manage(indexing_service);
 
             log::info!("Screenshot Search initialized successfully");
 

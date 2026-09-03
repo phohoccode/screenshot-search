@@ -31,9 +31,11 @@ import {
   getScreenshot,
   getScreenshotImageUrl,
   getScreenshotImageData,
+  getLocalPlaceholderSvg,
   openScreenshot,
   revealScreenshot,
   getOcrStats,
+  onIndexingCompleted,
 } from "@/lib/tauri";
 import type {
   SearchResultItem,
@@ -89,7 +91,13 @@ export function SearchPage() {
     if (selectedScreenshot) {
       setIsModalImageLoading(true);
       setModalImageFailed(false);
-      setModalImageSrc(getScreenshotImageUrl(selectedScreenshot.id, selectedScreenshot.path));
+      setModalImageSrc(
+        getScreenshotImageUrl(
+          selectedScreenshot.id,
+          selectedScreenshot.path,
+          selectedScreenshot.contentHash
+        )
+      );
     } else {
       setModalImageSrc(null);
     }
@@ -115,6 +123,29 @@ export function SearchPage() {
       .then(setStats)
       .catch(() => setStats(null));
   }, []);
+
+  // Listen to background indexing completion events to refresh results automatically
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    onIndexingCompleted(() => {
+      getOcrStats()
+        .then(setStats)
+        .catch(() => {});
+      // Silently refresh current results so new screenshots pop up without resetting scroll
+      searchScreenshots(debouncedQuery, undefined, 50, 0)
+        .then((res) => {
+          setResults(res.items);
+          setTotalMatches(res.totalMatches);
+        })
+        .catch(() => {});
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [debouncedQuery]);
 
   // Keyboard shortcut: "/" to focus search input
   useEffect(() => {
@@ -337,14 +368,14 @@ export function SearchPage() {
                   {/* Thumbnail */}
                   <div className="relative aspect-video w-full overflow-hidden bg-muted/40">
                     <img
-                      src={getScreenshotImageUrl(item.id, item.path)}
+                      src={getScreenshotImageUrl(item.id, item.path, item.contentHash)}
                       alt={item.filename}
                       loading="lazy"
                       className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
                       onError={(e) => {
                         const target = e.target as HTMLImageElement;
                         target.onerror = null;
-                        target.src = `https://placehold.co/600x400/18181b/ffffff?text=${encodeURIComponent(item.filename)}`;
+                        target.src = getLocalPlaceholderSvg(item.filename);
                       }}
                     />
                     {/* Hover Overlay Action Bar */}
@@ -448,7 +479,11 @@ export function SearchPage() {
                     <img
                       src={
                         modalImageSrc ||
-                        getScreenshotImageUrl(selectedScreenshot.id, selectedScreenshot.path)
+                        getScreenshotImageUrl(
+                          selectedScreenshot.id,
+                          selectedScreenshot.path,
+                          selectedScreenshot.contentHash
+                        )
                       }
                       alt={selectedScreenshot.filename}
                       onLoad={() => setIsModalImageLoading(false)}

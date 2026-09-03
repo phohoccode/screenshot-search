@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' http://screenshot.localhost screenshot: http://asset.localhost asset: data: blob: https://placehold.co; style-src 'self' 'unsafe-inline'",
+      "csp": "default-src 'self'; img-src 'self' http://screenshot.localhost screenshot: http://asset.localhost asset: data: blob:; style-src 'self' 'unsafe-inline'",
       "assetProtocol": {
         "enable": true,
         "scope": []

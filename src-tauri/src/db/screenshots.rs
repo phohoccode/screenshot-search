@@ -256,6 +256,7 @@ pub struct ScreenshotDetail {
     pub extension: String,
     pub file_size: u64,
     pub modified_at_fs: String,
+    pub content_hash: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub ocr_text: Option<String>,
@@ -323,6 +324,29 @@ pub fn mark_ocr_failed(conn: &Connection, id: i64, ocr_engine: &str) -> Result<(
     Ok(())
 }
 
+fn map_screenshot_detail_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScreenshotDetail> {
+    let file_size: i64 = row.get(5)?;
+    let width: Option<i64> = row.get(8)?;
+    let height: Option<i64> = row.get(9)?;
+
+    Ok(ScreenshotDetail {
+        id: row.get(0)?,
+        folder_id: row.get(1)?,
+        path: row.get(2)?,
+        filename: row.get(3)?,
+        extension: row.get(4)?,
+        file_size: file_size as u64,
+        modified_at_fs: row.get(6)?,
+        content_hash: row.get(7)?,
+        width: width.map(|w| w as u32),
+        height: height.map(|h| h as u32),
+        ocr_text: row.get(10)?,
+        ocr_status: row.get(11)?,
+        ocr_engine: row.get(12)?,
+        indexed_at: row.get(13)?,
+    })
+}
+
 /// Retrieves complete metadata and OCR text for a single screenshot by ID.
 pub fn get_screenshot_by_id(
     conn: &Connection,
@@ -332,34 +356,44 @@ pub fn get_screenshot_by_id(
         .prepare(
             "SELECT 
                 id, folder_id, path, filename, extension, file_size, modified_at_fs,
-                width, height, ocr_text, ocr_status, ocr_engine, indexed_at
+                content_hash, width, height, ocr_text, ocr_status, ocr_engine, indexed_at
              FROM screenshots 
              WHERE id = ?1",
         )
         .map_err(|e| AppError::database(format!("Failed to prepare get_screenshot_by_id: {e}")))?;
 
     let mut rows = stmt
-        .query_map(params![id], |row| {
-            let file_size: i64 = row.get(5)?;
-            let width: Option<i64> = row.get(7)?;
-            let height: Option<i64> = row.get(8)?;
+        .query_map(params![id], map_screenshot_detail_row)
+        .map_err(|e| AppError::database(format!("Failed to query screenshot detail: {e}")))?;
 
-            Ok(ScreenshotDetail {
-                id: row.get(0)?,
-                folder_id: row.get(1)?,
-                path: row.get(2)?,
-                filename: row.get(3)?,
-                extension: row.get(4)?,
-                file_size: file_size as u64,
-                modified_at_fs: row.get(6)?,
-                width: width.map(|w| w as u32),
-                height: height.map(|h| h as u32),
-                ocr_text: row.get(9)?,
-                ocr_status: row.get(10)?,
-                ocr_engine: row.get(11)?,
-                indexed_at: row.get(12)?,
-            })
-        })
+    match rows.next() {
+        Some(Ok(detail)) => Ok(Some(detail)),
+        Some(Err(e)) => Err(AppError::database(format!(
+            "Failed to read screenshot detail: {e}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Retrieves complete metadata and OCR text for a single screenshot by path.
+pub fn get_screenshot_by_path(
+    conn: &Connection,
+    path: &str,
+) -> Result<Option<ScreenshotDetail>, AppError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT 
+                id, folder_id, path, filename, extension, file_size, modified_at_fs,
+                content_hash, width, height, ocr_text, ocr_status, ocr_engine, indexed_at
+             FROM screenshots 
+             WHERE path = ?1",
+        )
+        .map_err(|e| {
+            AppError::database(format!("Failed to prepare get_screenshot_by_path: {e}"))
+        })?;
+
+    let mut rows = stmt
+        .query_map(params![path], map_screenshot_detail_row)
         .map_err(|e| AppError::database(format!("Failed to query screenshot detail: {e}")))?;
 
     match rows.next() {

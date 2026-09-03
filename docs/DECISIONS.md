@@ -308,6 +308,33 @@ On Windows, the application requires the `windows` crate (WinRT bindings). For d
 
 ---
 
+## ADR-014 — Filesystem Watcher, Sliding Debouncer, and Durable SQLite Queue for Reliable Background Indexing
+
+**Status:** Accepted
+
+### Decision
+
+For Phase 2 automatic background indexing, decouple filesystem notifications from OCR execution through three distinct architectural stages:
+1. **OS Watcher Layer (`notify` crate):** Uses native Windows `ReadDirectoryChangesW` (via `RecommendedWatcher`) with recursive monitoring. Filters out temporary files (`.tmp`, `.crdownload`, `~$*`) and non-image artifacts immediately.
+2. **In-Memory Sliding Debouncer (`WatcherManager`):** Coalesces rapid filesystem burst sequences (e.g. `Create + Modify + Modify` during file downloads or screenshot saves) over a 500ms sliding window per normalized path. Runs a pre-flight file stability verification (verifying file size/mtime over 150ms and shared file opening) to eliminate partial-write OCR errors.
+3. **Durable SQLite Queue (`index_jobs` table via Migration v3):** Enqueues stable jobs with unique `dedupe_key` (`ON CONFLICT DO NOTHING`). A dedicated single-flight background worker claims jobs atomically via `UPDATE ... RETURNING` with time-bounded leases. Stale leases are automatically recovered upon startup or lease expiration.
+4. **Startup Reconciliation:** On app startup, reconciles all enabled folders in the background to discover, update, or remove files changed while the application was closed.
+
+### Reasons
+
+- **Windows I/O Behavior:** Screenshot tools and web browsers flush image chunks over several milliseconds while holding exclusive write locks (`ERROR_SHARING_VIOLATION`). Attempting OCR directly on `Create` events leads to frequent decode panics or empty OCR results.
+- **Crash Resilience:** In-memory queue designs lose work on app exit or crash. Storing jobs in SQLite guarantees that every discovered screenshot eventually gets indexed.
+- **Atomic Concurrency:** The single-statement `UPDATE ... RETURNING` pattern prevents race conditions between worker claims without needing external distributed locks or Redis.
+- **FTS5 Invalidation Consistency:** When a file changes, the worker immediately deletes old FTS5 rows before extracting new OCR text, preventing stale search matches.
+
+### Consequences
+
+- All filesystem events transition into SQLite records before OCR.
+- The `index_jobs` table retains succeeded/failed jobs for a 24-hour cleanup window for diagnostic visibility.
+- Concurrency remains conservative (1 OCR worker thread) to protect system responsiveness.
+
+---
+
 ## ADR Template
 
 Use this template for future decisions.

@@ -11,6 +11,8 @@ import type {
   SearchResultItem,
   ScreenshotDetail,
   SearchIndexHealth,
+  IndexingServiceStatus,
+  IndexingJobCompletedPayload,
   AppError,
 } from "@/types";
 
@@ -229,33 +231,49 @@ export async function onOcrProgress(
   return () => {};
 }
 
+/** Local zero-network SVG placeholder for offline / browser preview fallback */
+export function getLocalPlaceholderSvg(label: string): string {
+  const safeText = label.replace(/[<>&"]/g, "");
+  return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400"><rect width="100%" height="100%" fill="%2318181b"/><text x="50%" y="50%" fill="%23a1a1aa" font-family="sans-serif" font-size="14" text-anchor="middle" dominant-baseline="middle">${encodeURIComponent(safeText)}</text></svg>`;
+}
+
 /**
  * Generates the secure URL to render a screenshot.
  * Uses the database-backed custom protocol `http://screenshot.localhost/<id>`.
+ * Appends `?v=<content_hash>` for instant image cache invalidation upon file modifications.
  * Does NOT require universal filesystem scopes or asset protocol wildcards.
  */
-export function getScreenshotImageUrl(id: number, filePath?: string): string {
+export function getScreenshotImageUrl(
+  id: number,
+  filePath?: string,
+  contentHash?: string | null
+): string {
+  const v = contentHash ? `?v=${encodeURIComponent(contentHash)}` : "";
   if (isTauri()) {
-    return `http://screenshot.localhost/${id}`;
+    return `http://screenshot.localhost/${id}${v}`;
   }
-  // Browser preview placeholder
+  // Browser preview local SVG placeholder
   const name = filePath ? filePath.split(/[\\/]/).pop() : `Screenshot #${id}`;
-  return `https://placehold.co/600x400/18181b/ffffff?text=${encodeURIComponent(name || "Screenshot")}`;
+  return getLocalPlaceholderSvg(name || "Screenshot");
 }
 
 /**
  * Converts a native filesystem path or screenshot id to a safe image URL.
  */
-export function getFileAssetUrl(filePath: string, id?: number): string {
+export function getFileAssetUrl(
+  filePath: string,
+  id?: number,
+  contentHash?: string | null
+): string {
   if (id !== undefined) {
-    return getScreenshotImageUrl(id, filePath);
+    return getScreenshotImageUrl(id, filePath, contentHash);
   }
   if (isTauri()) {
     const normalized = filePath.replace(/\\/g, "/");
     return convertFileSrc(normalized);
   }
   const name = filePath.split(/[\\/]/).pop() || "Screenshot";
-  return `https://placehold.co/600x400/18181b/ffffff?text=${encodeURIComponent(name)}`;
+  return getLocalPlaceholderSvg(name);
 }
 
 /** Directly retrieves base64-encoded image data URL for a screenshot by ID */
@@ -263,7 +281,7 @@ export async function getScreenshotImageData(id: number): Promise<string> {
   if (isTauri()) {
     return await invoke<string>("get_screenshot_image", { id });
   }
-  return `https://placehold.co/600x400/18181b/ffffff?text=${encodeURIComponent(`Screenshot #${id}`)}`;
+  return getLocalPlaceholderSvg(`Screenshot #${id}`);
 }
 
 // Mock search results for pure browser preview mode
@@ -407,4 +425,58 @@ export async function checkSearchIndexHealth(): Promise<SearchIndexHealth> {
     succeededCount: mockSearchScreenshots.length,
     isHealthy: true,
   };
+}
+
+/** Retrieves status of the automatic background indexing service */
+export async function getIndexingStatus(): Promise<IndexingServiceStatus> {
+  if (isTauri()) {
+    return await invoke<IndexingServiceStatus>("get_indexing_status");
+  }
+  return {
+    isRunning: true,
+    isPaused: false,
+    activeWatchersCount: mockFolders.length,
+    stats: {
+      pending: mockOcrStats.pending,
+      processing: mockOcrStats.processing,
+      succeeded: mockOcrStats.succeeded,
+      failed: mockOcrStats.failed,
+      total: mockOcrStats.total,
+    },
+  };
+}
+
+/** Pauses background indexing */
+export async function pauseIndexing(): Promise<void> {
+  if (isTauri()) {
+    await invoke<void>("pause_indexing");
+  }
+}
+
+/** Resumes background indexing */
+export async function resumeIndexing(): Promise<void> {
+  if (isTauri()) {
+    await invoke<void>("resume_indexing");
+  }
+}
+
+/** Retries all failed index jobs */
+export async function retryFailedIndexJobs(): Promise<number> {
+  if (isTauri()) {
+    return await invoke<number>("retry_failed_index_jobs");
+  }
+  return 0;
+}
+
+/** Subscribes to events when an indexing job finishes */
+export async function onIndexingCompleted(
+  callback: (payload: IndexingJobCompletedPayload) => void
+): Promise<UnlistenFn> {
+  if (isTauri()) {
+    return await listen<IndexingJobCompletedPayload>(
+      "indexing_job_completed",
+      (event) => callback(event.payload)
+    );
+  }
+  return () => {};
 }

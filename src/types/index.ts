@@ -72,6 +72,7 @@ export interface SearchResultItem {
   path: string;
   filename: string;
   modifiedAtFs: string;
+  contentHash?: string | null;
   width?: number | null;
   height?: number | null;
   matchSnippet?: string | null;
@@ -94,12 +95,35 @@ export interface ScreenshotDetail {
   extension: string;
   fileSize: number;
   modifiedAtFs: string;
+  contentHash?: string | null;
   width?: number | null;
   height?: number | null;
   ocrText?: string | null;
   ocrStatus: string;
   ocrEngine?: string | null;
   indexedAt?: string | null;
+}
+
+/** Durable background queue diagnostic metrics */
+export interface IndexJobStats {
+  pending: number;
+  processing: number;
+  succeeded: number;
+  failed: number;
+  total: number;
+}
+
+/** High-level status of the automatic background indexing service */
+export interface IndexingServiceStatus {
+  isRunning: boolean;
+  isPaused: boolean;
+  activeWatchersCount: number;
+  stats: IndexJobStats;
+}
+
+export interface IndexingJobCompletedPayload {
+  jobId: number;
+  path: string;
 }
 
 /** Search index health diagnostic metrics */

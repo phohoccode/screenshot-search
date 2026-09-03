@@ -23,6 +23,7 @@ pub struct SearchResultItem {
     pub path: String,
     pub filename: String,
     pub modified_at_fs: String,
+    pub content_hash: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub match_snippet: Option<String>,
@@ -110,7 +111,7 @@ pub fn search_screenshots(
             let query_sql = match req.folder_id {
                 Some(_) => {
                     "SELECT s.id, s.folder_id, s.path, s.filename, s.modified_at_fs, 
-                            s.width, s.height, NULL, 0.0
+                            s.content_hash, s.width, s.height, NULL, 0.0
                      FROM screenshots s
                      WHERE s.ocr_status = 'SUCCEEDED' AND s.folder_id = ?1
                      ORDER BY s.modified_at_fs DESC, s.id DESC
@@ -118,7 +119,7 @@ pub fn search_screenshots(
                 }
                 None => {
                     "SELECT s.id, s.folder_id, s.path, s.filename, s.modified_at_fs, 
-                            s.width, s.height, NULL, 0.0
+                            s.content_hash, s.width, s.height, NULL, 0.0
                      FROM screenshots s
                      WHERE s.ocr_status = 'SUCCEEDED'
                      ORDER BY s.modified_at_fs DESC, s.id DESC
@@ -137,10 +138,11 @@ pub fn search_screenshots(
                     path: row.get(2)?,
                     filename: row.get(3)?,
                     modified_at_fs: row.get(4)?,
-                    width: row.get(5)?,
-                    height: row.get(6)?,
-                    match_snippet: row.get(7)?,
-                    score: row.get(8)?,
+                    content_hash: row.get(5)?,
+                    width: row.get(6)?,
+                    height: row.get(7)?,
+                    match_snippet: row.get(8)?,
+                    score: row.get(9)?,
                 })
             };
 
@@ -207,6 +209,7 @@ pub fn search_screenshots(
                         s.path, 
                         s.filename, 
                         s.modified_at_fs, 
+                        s.content_hash,
                         s.width, 
                         s.height,
                         COALESCE(
@@ -229,6 +232,7 @@ pub fn search_screenshots(
                         s.path, 
                         s.filename, 
                         s.modified_at_fs, 
+                        s.content_hash,
                         s.width, 
                         s.height,
                         COALESCE(
@@ -250,7 +254,7 @@ pub fn search_screenshots(
             })?;
 
             let map_row = |row: &rusqlite::Row| {
-                let raw_score: f64 = row.get(8)?;
+                let raw_score: f64 = row.get(9)?;
                 // BM25 returns negative values where lower = more relevant. Invert to positive for DTO.
                 let normalized_score = -raw_score;
 
@@ -260,9 +264,10 @@ pub fn search_screenshots(
                     path: row.get(2)?,
                     filename: row.get(3)?,
                     modified_at_fs: row.get(4)?,
-                    width: row.get(5)?,
-                    height: row.get(6)?,
-                    match_snippet: row.get(7)?,
+                    content_hash: row.get(5)?,
+                    width: row.get(6)?,
+                    height: row.get(7)?,
+                    match_snippet: row.get(8)?,
                     score: normalized_score,
                 })
             };

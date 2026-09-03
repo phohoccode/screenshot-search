@@ -56,6 +56,33 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        version: 3,
+        sql: "
+            CREATE TABLE IF NOT EXISTS index_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+                screenshot_id INTEGER REFERENCES screenshots(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                job_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                dedupe_key TEXT NOT NULL UNIQUE,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 5,
+                available_at TEXT NOT NULL DEFAULT (datetime('now')),
+                lease_until TEXT,
+                last_error_code TEXT,
+                last_error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_index_jobs_status_available ON index_jobs(status, available_at);
+            CREATE INDEX IF NOT EXISTS idx_index_jobs_folder_id ON index_jobs(folder_id);
+            CREATE INDEX IF NOT EXISTS idx_index_jobs_screenshot_id ON index_jobs(screenshot_id);
+        ",
+    },
 ];
 
 /// Backfills existing SUCCEEDED screenshots into the FTS5 index upon migration to v2.

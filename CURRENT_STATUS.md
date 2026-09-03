@@ -9,17 +9,21 @@
 
 ## Current Phase
 
-**Phase 1D — SQLite FTS5 Keyword Search + OCR-Tolerant Search**  
-**Status:** COMPLETED — **CORE MVP COMPLETED**
+**Phase 2 — Automatic Filesystem Watcher + Background Indexing Reliability**  
+**Status:** COMPLETED
 
-The core product lifecycle is now complete:
-1. Select folder
-2. Scan & discover screenshots
-3. Extract text locally with Windows.Media.Ocr
-4. Search keywords, phrases, codes (`P2028`, `HTTP 500`), and identifiers (`ERR_MODULE_NOT_FOUND`) with OCR-tolerant matching
-5. View responsive results grid with highlighted snippets
-6. Inspect screenshot in full preview dialog and copy OCR text
-7. Open original in default viewer and reveal in Windows File Explorer
+The automatic, zero-manual-intervention background indexing pipeline is now complete:
+1. Watched folders monitored continuously via native Windows ReadDirectoryChangesW (`notify` crate).
+2. Temporary files (`.tmp`, `.crdownload`, `~$*`) and non-image artifacts filtered out immediately.
+3. Rapid filesystem burst events coalesced in-memory with a 500ms sliding debounce window.
+4. File stability verification checks file size and mtime and tests shared file opening to avoid partial-write OCR.
+5. Durable SQLite job queue (`index_jobs` table via Migration v3) with atomic claims, crash-proof leases, deduplication, and exponential backoff.
+6. Single-flight conservative OCR background worker processes jobs off-thread without database locks.
+7. File modifications immediately invalidate old FTS5 search entries and update with new OCR text.
+8. File deletions verify genuine NotFound on disk and remove screenshot metadata and FTS5 entries atomically.
+9. Startup reconciliation automatically discovers and enqueues offline additions, edits, and deletions across all enabled folders.
+10. UI enhanced with live "Watching" badges, background indexing status dashboard, pause/resume controls, retry failed actions, and cache-busted preview rendering (`?v=<content_hash>`).
+11. Zero external network calls verified: external placeholder dependencies completely eliminated.
 
 ---
 
@@ -27,12 +31,11 @@ The core product lifecycle is now complete:
 
 - `cargo fmt --check` → **PASS** (0 formatting diffs across `src-tauri/`)
 - `cargo check --manifest-path ./src-tauri/Cargo.toml` → **PASS** (Clean compilation, 0 errors, 0 warnings)
-- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**46 passed**; 0 failed; finished in 0.64s)
+- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**55 passed**; 0 failed; finished in 0.77s)
 - `npm run typecheck` → **PASS** (0 TypeScript errors in `src/`)
-- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.15s)
-- `npm run tauri dev` → **PASS** (Window launched, custom `screenshot://` protocol operational)
-- **Runtime Image Rendering** → **PASS** (DB-bound custom scheme `http://screenshot.localhost/<id>`, no wildcard `**` scope, aspect ratio preserved, loading/error states)
-- **FTS5 Benchmark** → **PASS** (1k records: 1.06 ms; 10k records: 7.27 ms single token, 12.13 ms phrase)
+- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.28s)
+- `npm run tauri dev` → **PASS** (Application booted, Migration v3 completed, background worker and watcher active, startup scan executed in 3ms)
+- **Micro-Hardening (Cache & Zero-Network)** → **PASS** (Preview URL includes `?v=<content_hash>`, external `placehold.co` removed from CSP and code in favor of local inline SVG)
 
 ---
 

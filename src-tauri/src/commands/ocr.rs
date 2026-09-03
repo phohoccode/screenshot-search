@@ -123,3 +123,37 @@ pub fn cancel_ocr_indexing(ocr_mgr: State<'_, OcrManager>) -> CommandResult<bool
     ocr_mgr.request_cancel();
     Ok(true)
 }
+
+/// Retrieves high-level status of the automatic background indexing service.
+#[tauri::command]
+pub fn get_indexing_status(
+    service: State<'_, std::sync::Arc<crate::indexing::service::IndexingService>>,
+) -> CommandResult<crate::indexing::service::IndexingServiceStatus> {
+    service.get_status()
+}
+
+/// Pauses automatic background indexing.
+#[tauri::command]
+pub fn pause_indexing(
+    service: State<'_, std::sync::Arc<crate::indexing::service::IndexingService>>,
+) -> CommandResult<()> {
+    service.pause();
+    Ok(())
+}
+
+/// Resumes automatic background indexing.
+#[tauri::command]
+pub fn resume_indexing(
+    service: State<'_, std::sync::Arc<crate::indexing::service::IndexingService>>,
+) -> CommandResult<()> {
+    service.resume();
+    Ok(())
+}
+
+/// Retries all failed index jobs.
+#[tauri::command]
+pub fn retry_failed_index_jobs(
+    service: State<'_, std::sync::Arc<crate::indexing::service::IndexingService>>,
+) -> CommandResult<usize> {
+    service.retry_failed()
+}
