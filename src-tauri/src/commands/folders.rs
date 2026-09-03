@@ -5,21 +5,23 @@ use tauri_plugin_dialog::DialogExt;
 use crate::db::connection::Database;
 use crate::db::folders::{self, FolderRecord};
 use crate::errors::{AppError, CommandResult};
-use crate::filesystem::metadata::normalize_path;
+use crate::filesystem::metadata::canonicalize_and_normalize;
 use crate::indexing::discovery::{execute_discovery_scan, ScanSummary};
 
 /// Lists all registered folders along with their screenshot count.
 #[tauri::command]
 pub fn list_folders(db: State<'_, Database>) -> CommandResult<Vec<FolderRecord>> {
-    let conn = db.conn.lock().map_err(|e| {
-        AppError::database(format!("Failed to acquire database lock: {e}"))
-    })?;
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
     folders::list_folders(&conn)
 }
 
 /// Adds a new folder for screenshot indexing.
 /// Validates that the path exists and is a directory.
+/// Resolves canonical casing and normalizes path before database check.
 /// Returns `FolderAlreadyExists` if the path is already registered.
 #[tauri::command]
 pub fn add_folder(
@@ -45,14 +47,15 @@ pub fn add_folder(
         )));
     }
 
-    let normalized = normalize_path(p);
+    let canonical_normalized = canonicalize_and_normalize(p);
     let is_recursive = recursive.unwrap_or(true);
 
-    let conn = db.conn.lock().map_err(|e| {
-        AppError::database(format!("Failed to acquire database lock: {e}"))
-    })?;
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
-    folders::insert_folder(&conn, &normalized, is_recursive)
+    folders::insert_folder(&conn, &canonical_normalized, is_recursive)
 }
 
 /// Removes a folder from Screenshot Search management.
@@ -60,9 +63,10 @@ pub fn add_folder(
 /// NEVER deletes original files on the filesystem.
 #[tauri::command]
 pub fn remove_folder(db: State<'_, Database>, id: i64) -> CommandResult<bool> {
-    let conn = db.conn.lock().map_err(|e| {
-        AppError::database(format!("Failed to acquire database lock: {e}"))
-    })?;
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
     folders::delete_folder(&conn, id)
 }
@@ -70,9 +74,10 @@ pub fn remove_folder(db: State<'_, Database>, id: i64) -> CommandResult<bool> {
 /// Executes a discovery / rescan on a specific folder by ID.
 #[tauri::command]
 pub fn scan_folder(db: State<'_, Database>, id: i64) -> CommandResult<ScanSummary> {
-    let conn = db.conn.lock().map_err(|e| {
-        AppError::database(format!("Failed to acquire database lock: {e}"))
-    })?;
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
     let folder = folders::get_folder_by_id(&conn, id)?
         .ok_or_else(|| AppError::folder_not_found(format!("Folder with id {id} not found")))?;
@@ -89,7 +94,7 @@ pub fn pick_folder(app: AppHandle) -> CommandResult<Option<String>> {
     match result {
         Some(file_path) => {
             let path_str = file_path.to_string();
-            let normalized = normalize_path(Path::new(&path_str));
+            let normalized = canonicalize_and_normalize(Path::new(&path_str));
             Ok(Some(normalized))
         }
         None => Ok(None),
@@ -99,9 +104,10 @@ pub fn pick_folder(app: AppHandle) -> CommandResult<Option<String>> {
 /// Returns the total number of screenshots indexed across all folders.
 #[tauri::command]
 pub fn get_total_screenshot_count(db: State<'_, Database>) -> CommandResult<usize> {
-    let conn = db.conn.lock().map_err(|e| {
-        AppError::database(format!("Failed to acquire database lock: {e}"))
-    })?;
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM screenshots", [], |row| row.get(0))

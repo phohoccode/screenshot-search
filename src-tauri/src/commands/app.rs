@@ -33,9 +33,10 @@ pub fn get_app_info(app: AppHandle) -> CommandResult<AppInfo> {
 /// Returns database health status — confirms DB is accessible.
 #[tauri::command]
 pub fn check_database(db: State<'_, Database>) -> CommandResult<bool> {
-    let conn = db.conn.lock().map_err(|e| {
-        AppError::database(format!("Failed to acquire database lock: {e}"))
-    })?;
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
     let result: i32 = conn
         .query_row("SELECT 1", [], |row| row.get(0))

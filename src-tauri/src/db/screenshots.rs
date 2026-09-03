@@ -46,9 +46,8 @@ pub fn get_existing_screenshots_for_folder(
 
     let mut map = HashMap::new();
     for row in rows {
-        let screenshot = row.map_err(|e| {
-            AppError::database(format!("Failed to read screenshot row: {e}"))
-        })?;
+        let screenshot =
+            row.map_err(|e| AppError::database(format!("Failed to read screenshot row: {e}")))?;
         map.insert(screenshot.path.clone(), screenshot);
     }
 

@@ -41,7 +41,9 @@ pub fn insert_folder(
     let id = conn.last_insert_rowid();
 
     get_folder_by_id(conn, id)?.ok_or_else(|| {
-        AppError::database(format!("Failed to retrieve newly inserted folder with id {id}"))
+        AppError::database(format!(
+            "Failed to retrieve newly inserted folder with id {id}"
+        ))
     })
 }
 
@@ -85,7 +87,8 @@ pub fn list_folders(conn: &Connection) -> Result<Vec<FolderRecord>, AppError> {
 
     let mut folders = Vec::new();
     for row in rows {
-        folders.push(row.map_err(|e| AppError::database(format!("Failed to read folder row: {e}")))?);
+        folders
+            .push(row.map_err(|e| AppError::database(format!("Failed to read folder row: {e}")))?);
     }
 
     Ok(folders)

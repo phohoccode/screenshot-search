@@ -15,11 +15,8 @@ pub struct Database {
 /// Creates the directory if it does not exist.
 pub fn resolve_app_data_dir(app_data_dir: &PathBuf) -> Result<PathBuf, AppError> {
     if !app_data_dir.exists() {
-        fs::create_dir_all(app_data_dir).map_err(|e| {
-            AppError::database(format!(
-                "Failed to create app data directory: {e}"
-            ))
-        })?;
+        fs::create_dir_all(app_data_dir)
+            .map_err(|e| AppError::database(format!("Failed to create app data directory: {e}")))?;
     }
     Ok(app_data_dir.clone())
 }
@@ -32,7 +29,10 @@ pub fn database_path(app_data_dir: &PathBuf) -> PathBuf {
 /// Initializes the SQLite connection with recommended pragmas.
 pub fn init_connection(db_path: &PathBuf) -> Result<Connection, AppError> {
     let conn = Connection::open(db_path).map_err(|e| {
-        AppError::database(format!("Failed to open database at {}: {e}", db_path.display()))
+        AppError::database(format!(
+            "Failed to open database at {}: {e}",
+            db_path.display()
+        ))
     })?;
 
     // Set recommended pragmas for performance and safety

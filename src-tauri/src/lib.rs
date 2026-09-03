@@ -32,14 +32,11 @@ pub fn run() {
                 .app_data_dir()
                 .expect("Failed to resolve app data directory");
 
-            log::info!(
-                "App data directory: {}",
-                app_data_dir.display()
-            );
+            log::info!("App data directory: {}", app_data_dir.display());
 
             // Initialize database
-            let database = db::connection::initialize(&app_data_dir)
-                .expect("Failed to initialize database");
+            let database =
+                db::connection::initialize(&app_data_dir).expect("Failed to initialize database");
 
             app.manage(database);
 

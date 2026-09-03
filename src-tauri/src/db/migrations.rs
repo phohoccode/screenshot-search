@@ -8,10 +8,9 @@ struct Migration {
 }
 
 /// All migrations in order. Append-only after release.
-const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        sql: "
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    sql: "
             CREATE TABLE IF NOT EXISTS folders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT NOT NULL UNIQUE,
@@ -45,8 +44,7 @@ const MIGRATIONS: &[Migration] = &[
             CREATE INDEX IF NOT EXISTS idx_screenshots_folder_id ON screenshots(folder_id);
             CREATE INDEX IF NOT EXISTS idx_screenshots_ocr_status ON screenshots(ocr_status);
         ",
-    },
-];
+}];
 
 /// Run all pending migrations.
 /// Uses a simple user_version-based mechanism.
@@ -72,10 +70,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), AppError> {
         );
 
         conn.execute_batch(migration.sql).map_err(|e| {
-            AppError::migration(format!(
-                "Migration v{} failed: {e}",
-                migration.version
-            ))
+            AppError::migration(format!("Migration v{} failed: {e}", migration.version))
         })?;
 
         conn.pragma_update(None, "user_version", migration.version)
