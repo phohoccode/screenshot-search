@@ -16,7 +16,12 @@ import type {
 
 /** Detects if the app is running inside a Tauri native window */
 export function isTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  return (
+    typeof window !== "undefined" &&
+    ("__TAURI_INTERNALS__" in window ||
+      "__TAURI__" in window ||
+      Boolean((window as unknown as { isTauri?: boolean }).isTauri))
+  );
 }
 
 // In-memory mock storage for pure web browser preview (npm run dev)
@@ -224,14 +229,41 @@ export async function onOcrProgress(
   return () => {};
 }
 
-/** Converts a native filesystem path to a safe Tauri asset protocol URL */
-export function getFileAssetUrl(filePath: string): string {
+/**
+ * Generates the secure URL to render a screenshot.
+ * Uses the database-backed custom protocol `http://screenshot.localhost/<id>`.
+ * Does NOT require universal filesystem scopes or asset protocol wildcards.
+ */
+export function getScreenshotImageUrl(id: number, filePath?: string): string {
   if (isTauri()) {
-    return convertFileSrc(filePath);
+    return `http://screenshot.localhost/${id}`;
   }
   // Browser preview placeholder
+  const name = filePath ? filePath.split(/[\\/]/).pop() : `Screenshot #${id}`;
+  return `https://placehold.co/600x400/18181b/ffffff?text=${encodeURIComponent(name || "Screenshot")}`;
+}
+
+/**
+ * Converts a native filesystem path or screenshot id to a safe image URL.
+ */
+export function getFileAssetUrl(filePath: string, id?: number): string {
+  if (id !== undefined) {
+    return getScreenshotImageUrl(id, filePath);
+  }
+  if (isTauri()) {
+    const normalized = filePath.replace(/\\/g, "/");
+    return convertFileSrc(normalized);
+  }
   const name = filePath.split(/[\\/]/).pop() || "Screenshot";
   return `https://placehold.co/600x400/18181b/ffffff?text=${encodeURIComponent(name)}`;
+}
+
+/** Directly retrieves base64-encoded image data URL for a screenshot by ID */
+export async function getScreenshotImageData(id: number): Promise<string> {
+  if (isTauri()) {
+    return await invoke<string>("get_screenshot_image", { id });
+  }
+  return `https://placehold.co/600x400/18181b/ffffff?text=${encodeURIComponent(`Screenshot #${id}`)}`;
 }
 
 // Mock search results for pure browser preview mode

@@ -42,6 +42,46 @@ pub fn get_screenshot(db: State<'_, Database>, id: i64) -> CommandResult<Screens
         .ok_or_else(|| AppError::file_not_found(format!("Screenshot with ID {id} not found")))
 }
 
+/// Securely loads image data for a screenshot that exists in the database.
+/// Security boundary: receives strictly `id: i64`, verifies existence in DB,
+/// ensures no arbitrary filesystem access, returns base64 data URL.
+pub fn get_screenshot_image_data_internal(db: &Database, id: i64) -> CommandResult<String> {
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
+
+    let detail = screenshots::get_screenshot_by_id(&conn, id)?
+        .ok_or_else(|| AppError::file_not_found(format!("Screenshot with ID {id} not found")))?;
+
+    let path = Path::new(&detail.path);
+    if !path.exists() {
+        return Err(AppError::file_not_found(format!(
+            "Screenshot file no longer exists at: {}",
+            detail.path
+        )));
+    }
+
+    let bytes = std::fs::read(path)
+        .map_err(|e| AppError::unknown(format!("Failed to read screenshot file from disk: {e}")))?;
+
+    let mime = match detail.extension.to_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    };
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+#[tauri::command]
+pub fn get_screenshot_image(db: State<'_, Database>, id: i64) -> CommandResult<String> {
+    get_screenshot_image_data_internal(&db, id)
+}
+
 /// Opens the screenshot using the native operating system default viewer.
 /// Security boundary: receives strictly `id: i64`, looks up verified path in database.
 #[tauri::command]

@@ -13,6 +13,7 @@ import {
   Maximize2,
   FileText,
   Loader2,
+  AlertCircle,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -28,9 +29,10 @@ import {
 import {
   searchScreenshots,
   getScreenshot,
+  getScreenshotImageUrl,
+  getScreenshotImageData,
   openScreenshot,
   revealScreenshot,
-  getFileAssetUrl,
   getOcrStats,
 } from "@/lib/tauri";
 import type {
@@ -77,6 +79,33 @@ export function SearchPage() {
   const [selectedScreenshot, setSelectedScreenshot] = useState<ScreenshotDetail | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
+
+  // Preview Modal Image Loading & Fallback State
+  const [modalImageSrc, setModalImageSrc] = useState<string | null>(null);
+  const [isModalImageLoading, setIsModalImageLoading] = useState(true);
+  const [modalImageFailed, setModalImageFailed] = useState(false);
+
+  useEffect(() => {
+    if (selectedScreenshot) {
+      setIsModalImageLoading(true);
+      setModalImageFailed(false);
+      setModalImageSrc(getScreenshotImageUrl(selectedScreenshot.id, selectedScreenshot.path));
+    } else {
+      setModalImageSrc(null);
+    }
+  }, [selectedScreenshot]);
+
+  const handleModalImageError = async () => {
+    if (!selectedScreenshot) return;
+    try {
+      const base64Data = await getScreenshotImageData(selectedScreenshot.id);
+      setModalImageSrc(base64Data);
+      setIsModalImageLoading(false);
+    } catch {
+      setModalImageFailed(true);
+      setIsModalImageLoading(false);
+    }
+  };
 
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -308,13 +337,14 @@ export function SearchPage() {
                   {/* Thumbnail */}
                   <div className="relative aspect-video w-full overflow-hidden bg-muted/40">
                     <img
-                      src={getFileAssetUrl(item.path)}
+                      src={getScreenshotImageUrl(item.id, item.path)}
                       alt={item.filename}
                       loading="lazy"
                       className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
                       onError={(e) => {
-                        // If file failed to load, show clean placeholder
-                        (e.target as HTMLElement).style.display = "none";
+                        const target = e.target as HTMLImageElement;
+                        target.onerror = null;
+                        target.src = `https://placehold.co/600x400/18181b/ffffff?text=${encodeURIComponent(item.filename)}`;
                       }}
                     />
                     {/* Hover Overlay Action Bar */}
@@ -393,12 +423,39 @@ export function SearchPage() {
               {/* Modal Body: Scrollable */}
               <div className="flex-1 overflow-y-auto p-6 space-y-5">
                 {/* Large Preview Image */}
-                <div className="flex items-center justify-center rounded-lg border border-border bg-muted/20 p-2 overflow-hidden max-h-[380px]">
-                  <img
-                    src={getFileAssetUrl(selectedScreenshot.path)}
-                    alt={selectedScreenshot.filename}
-                    className="max-h-[360px] max-w-full rounded object-contain"
-                  />
+                <div className="relative flex min-h-[240px] max-h-[420px] w-full items-center justify-center rounded-lg border border-border bg-muted/10 p-2 overflow-hidden">
+                  {isModalImageLoading && !modalImageFailed && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background/60 backdrop-blur-xs z-10">
+                      <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                      <span className="text-xs text-muted-foreground">Loading preview...</span>
+                    </div>
+                  )}
+                  {modalImageFailed ? (
+                    <div className="flex flex-col items-center justify-center gap-2 p-6 text-center text-muted-foreground">
+                      <AlertCircle className="h-8 w-8 text-destructive" />
+                      <p className="text-xs font-semibold text-foreground">
+                        Screenshot file could not be loaded
+                      </p>
+                      <p className="max-w-md text-[11px] text-muted-foreground">
+                        The file may have been moved, renamed, or deleted from disk:
+                        <br />
+                        <code className="mt-1.5 inline-block rounded bg-muted px-2 py-1 font-mono text-[10px] text-foreground break-all">
+                          {selectedScreenshot.path}
+                        </code>
+                      </p>
+                    </div>
+                  ) : (
+                    <img
+                      src={
+                        modalImageSrc ||
+                        getScreenshotImageUrl(selectedScreenshot.id, selectedScreenshot.path)
+                      }
+                      alt={selectedScreenshot.filename}
+                      onLoad={() => setIsModalImageLoading(false)}
+                      onError={handleModalImageError}
+                      className="max-h-[400px] w-auto max-w-full rounded object-contain shadow-xs transition-opacity duration-150"
+                    />
+                  )}
                 </div>
 
                 {/* Metadata details row */}

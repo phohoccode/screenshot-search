@@ -739,3 +739,104 @@ fn test_search_benchmark_1k_and_10k() {
     }
     println!("=====================================================================\n");
 }
+
+#[test]
+fn test_secure_image_loading_and_mime_types() {
+    use std::fs::File;
+    use std::io::Write;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let conn = setup_test_db();
+    conn.execute(
+        "INSERT INTO folders (id, path) VALUES (1, 'C:\\Screenshots')",
+        [],
+    )
+    .unwrap();
+
+    // 1. Create a dummy PNG
+    let png_path = dir.path().join("test_image.png");
+    {
+        let mut f = File::create(&png_path).unwrap();
+        f.write_all(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR").unwrap();
+    }
+
+    let png_id = insert_screenshot(
+        &conn,
+        1,
+        &png_path.to_string_lossy(),
+        "test_image.png",
+        "png",
+        20,
+        "2026-09-03T12:00:00Z",
+        "hash_png",
+    )
+    .unwrap();
+
+    // 2. Create a dummy JPG with spaces in filename
+    let jpg_path = dir.path().join("Screenshot (42) with spaces.jpg");
+    {
+        let mut f = File::create(&jpg_path).unwrap();
+        f.write_all(b"\xFF\xD8\xFF\xE0\x00\x10JFIF").unwrap();
+    }
+
+    let jpg_id = insert_screenshot(
+        &conn,
+        1,
+        &jpg_path.to_string_lossy(),
+        "Screenshot (42) with spaces.jpg",
+        "jpg",
+        18,
+        "2026-09-03T12:00:00Z",
+        "hash_jpg",
+    )
+    .unwrap();
+
+    // 3. Create a dummy WEBP
+    let webp_path = dir.path().join("card.webp");
+    {
+        let mut f = File::create(&webp_path).unwrap();
+        f.write_all(b"RIFF....WEBPVP8 ").unwrap();
+    }
+
+    let webp_id = insert_screenshot(
+        &conn,
+        1,
+        &webp_path.to_string_lossy(),
+        "card.webp",
+        "webp",
+        16,
+        "2026-09-03T12:00:00Z",
+        "hash_webp",
+    )
+    .unwrap();
+
+    let db = crate::db::connection::Database {
+        conn: Arc::new(std::sync::Mutex::new(conn)),
+    };
+
+    // Verify PNG loading and MIME
+    let png_data =
+        crate::commands::search::get_screenshot_image_data_internal(&db, png_id).unwrap();
+    assert!(png_data.starts_with("data:image/png;base64,"));
+
+    // Verify JPG loading with spaces in path
+    let jpg_data =
+        crate::commands::search::get_screenshot_image_data_internal(&db, jpg_id).unwrap();
+    assert!(jpg_data.starts_with("data:image/jpeg;base64,"));
+
+    // Verify WEBP loading
+    let webp_data =
+        crate::commands::search::get_screenshot_image_data_internal(&db, webp_id).unwrap();
+    assert!(webp_data.starts_with("data:image/webp;base64,"));
+
+    // Verify security: non-existent ID is rejected
+    let non_existent = crate::commands::search::get_screenshot_image_data_internal(&db, 99999);
+    assert!(non_existent.is_err());
+
+    // Verify security: deleted file from disk is rejected
+    std::fs::remove_file(&png_path).unwrap();
+    let deleted_err = crate::commands::search::get_screenshot_image_data_internal(&db, png_id);
+    assert!(deleted_err.is_err());
+}

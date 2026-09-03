@@ -27,10 +27,11 @@ The core product lifecycle is now complete:
 
 - `cargo fmt --check` → **PASS** (0 formatting diffs across `src-tauri/`)
 - `cargo check --manifest-path ./src-tauri/Cargo.toml` → **PASS** (Clean compilation, 0 errors, 0 warnings)
-- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**45 passed**; 0 failed; finished in 0.63s)
+- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**46 passed**; 0 failed; finished in 0.64s)
 - `npm run typecheck` → **PASS** (0 TypeScript errors in `src/`)
-- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.11s)
-- `npm run tauri dev` → **PASS** (Migration v2 auto-applied, 11 existing records backfilled, window launched)
+- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.15s)
+- `npm run tauri dev` → **PASS** (Window launched, custom `screenshot://` protocol operational)
+- **Runtime Image Rendering** → **PASS** (DB-bound custom scheme `http://screenshot.localhost/<id>`, no wildcard `**` scope, aspect ratio preserved, loading/error states)
 - **FTS5 Benchmark** → **PASS** (1k records: 1.06 ms; 10k records: 7.27 ms single token, 12.13 ms phrase)
 
 ---
