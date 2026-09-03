@@ -43,11 +43,11 @@ pub fn normalize_ocr_text(raw: &str) -> String {
             consecutive_empty_lines += 1;
             // 5. Allow at most 1 empty line in a row
             if consecutive_empty_lines <= 1 && !result_lines.is_empty() {
-                result_lines.push("");
+                result_lines.push(String::new());
             }
         } else {
             consecutive_empty_lines = 0;
-            result_lines.push(trimmed_line);
+            result_lines.push(trimmed_line.to_string());
         }
     }
 

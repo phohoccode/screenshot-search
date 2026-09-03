@@ -316,6 +316,7 @@ mod tests {
             updated_at: folder.updated_at.clone(),
             last_scanned_at: folder.last_scanned_at.clone(),
             screenshot_count: 1,
+            ocr_succeeded_count: 0,
         };
 
         let summary =

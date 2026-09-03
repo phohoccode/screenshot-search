@@ -43,7 +43,7 @@ impl WindowsMediaOcrEngine {
                         .map(|t| t.to_string())
                         .unwrap_or_else(|_| "unknown".to_string());
 
-                    let max_image_dimension = engine.MaxImageDimension().unwrap_or(2600);
+                    let max_image_dimension = WinRtOcrEngine::MaxImageDimension().unwrap_or(2600);
 
                     Self {
                         engine: Some(engine),
@@ -96,6 +96,50 @@ impl Default for WindowsMediaOcrEngine {
     }
 }
 
+/// Bounded sub-rectangle for in-memory image tile extraction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileBounds {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[cfg(target_os = "windows")]
+impl From<TileBounds> for windows::Graphics::Imaging::BitmapBounds {
+    fn from(t: TileBounds) -> Self {
+        Self {
+            X: t.x,
+            Y: t.y,
+            Width: t.width,
+            Height: t.height,
+        }
+    }
+}
+
+/// Adaptive OCR processing strategy based on image dimension and aspect ratio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OcrProcessingStrategy {
+    /// Normal image (<= 2600px): direct recognition at 100% native resolution.
+    Direct,
+    /// Moderately oversized (aspect ratio <= 2.2, max side > 2600px, e.g. 4K 3840x2160):
+    /// Proportional downscaling preserving aspect ratio with Fant interpolation.
+    ProportionalDownscale {
+        target_width: u32,
+        target_height: u32,
+    },
+    /// Extremely tall screenshot (aspect ratio > 2.2, height > 2600px, e.g. 1080x5200, 1440x10000):
+    /// Split vertically into bounded overlapping tiles to preserve native text resolution.
+    VerticalTiling { tiles: Vec<TileBounds> },
+    /// Extremely wide screenshot (aspect ratio > 2.2, width > 2600px, e.g. 5120x1440):
+    /// Split horizontally into bounded overlapping tiles.
+    HorizontalTiling { tiles: Vec<TileBounds> },
+}
+
+pub const SAFE_MAX_OCR_DIMENSION: u32 = 2600;
+pub const TILE_SIZE: u32 = 2000;
+pub const TILE_OVERLAP: u32 = 150;
+
 /// Helper function to calculate aspect-ratio-preserving dimensions for oversized images.
 pub fn calculate_downscaled_dimensions(width: u32, height: u32, max_dimension: u32) -> (u32, u32) {
     if width <= max_dimension && height <= max_dimension {
@@ -111,10 +155,115 @@ pub fn calculate_downscaled_dimensions(width: u32, height: u32, max_dimension: u
     (target_width.max(1), target_height.max(1))
 }
 
+/// Determines the optimal OCR processing strategy for the given dimensions.
+pub fn determine_processing_strategy(
+    width: u32,
+    height: u32,
+    max_dimension: u32,
+) -> OcrProcessingStrategy {
+    let safe_limit = max_dimension.min(SAFE_MAX_OCR_DIMENSION);
+
+    if width <= safe_limit && height <= safe_limit {
+        return OcrProcessingStrategy::Direct;
+    }
+
+    // Extremely tall screenshot: height > 2x width and height > safe_limit
+    if height > width * 2 && height > safe_limit {
+        let step = TILE_SIZE.saturating_sub(TILE_OVERLAP).max(1);
+        let mut tiles = Vec::new();
+        let mut y = 0;
+        while y < height {
+            let cur_h = (height - y).min(TILE_SIZE);
+            tiles.push(TileBounds {
+                x: 0,
+                y,
+                width,
+                height: cur_h,
+            });
+            if y + cur_h >= height {
+                break;
+            }
+            y += step;
+        }
+        return OcrProcessingStrategy::VerticalTiling { tiles };
+    }
+
+    // Extremely wide screenshot: width > 2x height and width > safe_limit
+    if width > height * 2 && width > safe_limit {
+        let step = TILE_SIZE.saturating_sub(TILE_OVERLAP).max(1);
+        let mut tiles = Vec::new();
+        let mut x = 0;
+        while x < width {
+            let cur_w = (width - x).min(TILE_SIZE);
+            tiles.push(TileBounds {
+                x,
+                y: 0,
+                width: cur_w,
+                height,
+            });
+            if x + cur_w >= width {
+                break;
+            }
+            x += step;
+        }
+        return OcrProcessingStrategy::HorizontalTiling { tiles };
+    }
+
+    // Moderately oversized (e.g. 4K 3840x2160, 16:9 standard ratio):
+    // Proportional downscale
+    let (target_width, target_height) = calculate_downscaled_dimensions(width, height, safe_limit);
+    OcrProcessingStrategy::ProportionalDownscale {
+        target_width,
+        target_height,
+    }
+}
+
+/// Merges text lines extracted from sequential overlapping tiles in deterministic reading order.
+/// Conservatively deduplicates overlapping lines and heals partially cropped boundary lines.
+pub fn merge_tile_texts(tile_texts: &[String]) -> String {
+    let mut merged_lines: Vec<String> = Vec::new();
+
+    for text in tile_texts {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Check if this line was already captured near the tail of previous tiles
+            let tail_start = merged_lines.len().saturating_sub(6);
+            let mut is_dup = false;
+
+            for i in tail_start..merged_lines.len() {
+                let existing = merged_lines[i].trim();
+                if existing.eq_ignore_ascii_case(trimmed) {
+                    is_dup = true;
+                    break;
+                }
+                // If a previous line was partially chopped off at tile border, replace with fuller version
+                if trimmed.len() > existing.len() && trimmed.starts_with(existing) {
+                    merged_lines[i] = trimmed.to_string();
+                    is_dup = true;
+                    break;
+                }
+            }
+
+            if !is_dup {
+                merged_lines.push(trimmed.to_string());
+            }
+        }
+    }
+
+    merged_lines.join("\n")
+}
+
 #[cfg(target_os = "windows")]
 impl OcrEngine for WindowsMediaOcrEngine {
     fn recognize(&self, image_path: &Path) -> Result<OcrResult, AppError> {
-        use windows::Graphics::Imaging::{BitmapDecoder, BitmapInterpolationMode, BitmapTransform};
+        use windows::Graphics::Imaging::{
+            BitmapDecoder, BitmapInterpolationMode, BitmapTransform, ColorManagementMode,
+            ExifOrientationMode,
+        };
         use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
 
         let engine = self.engine.as_ref().ok_or_else(|| {
@@ -130,7 +279,7 @@ impl OcrEngine for WindowsMediaOcrEngine {
             )));
         }
 
-        // 1. Read file bytes from disk (original file is never modified)
+        // 1. Read file bytes from disk (original file is strictly never modified)
         let bytes = std::fs::read(image_path).map_err(|e| {
             AppError::ocr_decode(format!(
                 "Failed to read image file {}: {e}",
@@ -168,82 +317,162 @@ impl OcrEngine for WindowsMediaOcrEngine {
                 ))
             })?;
 
-        // 3. Inspect dimensions and safely downscale in-memory if dimensions exceed MaxImageDimension
+        // 3. Inspect dimensions and determine optimal processing strategy
         let pixel_width = decoder.PixelWidth().unwrap_or(0);
         let pixel_height = decoder.PixelHeight().unwrap_or(0);
         let max_dim = self.info.max_image_dimension;
 
-        let bitmap = if pixel_width > max_dim || pixel_height > max_dim {
-            let (target_width, target_height) =
-                calculate_downscaled_dimensions(pixel_width, pixel_height, max_dim);
+        let strategy = determine_processing_strategy(pixel_width, pixel_height, max_dim);
+        log::debug!(
+            "OCR processing strategy for {} ({}x{}): {:?}",
+            image_path.display(),
+            pixel_width,
+            pixel_height,
+            strategy
+        );
 
-            log::debug!(
-                "Screenshot {} exceeds OCR MaxImageDimension ({}x{} > {}). Downscaling in-memory to {}x{} for recognition",
-                image_path.display(),
-                pixel_width,
-                pixel_height,
-                max_dim,
+        let pixel_format = decoder
+            .BitmapPixelFormat()
+            .map_err(|e| AppError::ocr_decode(e.to_string()))?;
+        let alpha_mode = decoder
+            .BitmapAlphaMode()
+            .map_err(|e| AppError::ocr_decode(e.to_string()))?;
+
+        // 4. Perform recognition according to strategy
+        let raw_text = match strategy {
+            OcrProcessingStrategy::Direct => {
+                let bitmap = decoder
+                    .GetSoftwareBitmapAsync()
+                    .map_err(|e| {
+                        AppError::ocr_decode(format!("Failed to get software bitmap: {e}"))
+                    })?
+                    .get()
+                    .map_err(|e| {
+                        AppError::ocr_decode(format!("Software bitmap conversion failed: {e}"))
+                    })?;
+
+                let ocr_result = engine
+                    .RecognizeAsync(&bitmap)
+                    .map_err(|e| AppError::ocr(format!("Recognition execution failed: {e}")))?
+                    .get()
+                    .map_err(|e| {
+                        AppError::ocr(format!("OCR recognition result extraction error: {e}"))
+                    })?;
+
+                ocr_result
+                    .Text()
+                    .map_err(|e| AppError::ocr(format!("Failed to extract recognized text: {e}")))?
+                    .to_string()
+            }
+            OcrProcessingStrategy::ProportionalDownscale {
                 target_width,
-                target_height
-            );
-
-            let transform = BitmapTransform::new().map_err(|e| {
-                AppError::ocr_decode(format!("Failed to create BitmapTransform: {e}"))
-            })?;
-            transform
-                .SetScaledWidth(target_width)
-                .map_err(|e| AppError::ocr_decode(format!("Failed to set scaled width: {e}")))?;
-            transform
-                .SetScaledHeight(target_height)
-                .map_err(|e| AppError::ocr_decode(format!("Failed to set scaled height: {e}")))?;
-            transform
-                .SetInterpolationMode(BitmapInterpolationMode::Fant)
-                .map_err(|e| {
-                    AppError::ocr_decode(format!("Failed to set interpolation mode: {e}"))
+                target_height,
+            } => {
+                let transform = BitmapTransform::new().map_err(|e| {
+                    AppError::ocr_decode(format!("Failed to create BitmapTransform: {e}"))
                 })?;
+                transform.SetScaledWidth(target_width).map_err(|e| {
+                    AppError::ocr_decode(format!("Failed to set scaled width: {e}"))
+                })?;
+                transform.SetScaledHeight(target_height).map_err(|e| {
+                    AppError::ocr_decode(format!("Failed to set scaled height: {e}"))
+                })?;
+                transform
+                    .SetInterpolationMode(BitmapInterpolationMode::Fant)
+                    .map_err(|e| {
+                        AppError::ocr_decode(format!("Failed to set interpolation mode: {e}"))
+                    })?;
 
-            decoder
-                .GetSoftwareBitmapAsync_WithTransform(
-                    decoder
-                        .BitmapPixelFormat()
-                        .map_err(|e| AppError::ocr_decode(e.to_string()))?,
-                    decoder
-                        .BitmapAlphaMode()
-                        .map_err(|e| AppError::ocr_decode(e.to_string()))?,
-                    &transform,
-                    windows::Graphics::Imaging::ExifOrientationMode::IgnoreExifOrientation,
-                    windows::Graphics::Imaging::ColorManagementMode::DoNotColorManage,
-                )
-                .map_err(|e| {
-                    AppError::ocr_decode(format!("Failed to get downscaled software bitmap: {e}"))
-                })?
-                .get()
-                .map_err(|e| {
-                    AppError::ocr_decode(format!(
-                        "Downscaled software bitmap transform failed: {e}"
-                    ))
-                })?
-        } else {
-            decoder
-                .GetSoftwareBitmapAsync()
-                .map_err(|e| AppError::ocr_decode(format!("Failed to get software bitmap: {e}")))?
-                .get()
-                .map_err(|e| {
-                    AppError::ocr_decode(format!("Software bitmap conversion failed: {e}"))
-                })?
+                let bitmap = decoder
+                    .GetSoftwareBitmapTransformedAsync(
+                        pixel_format,
+                        alpha_mode,
+                        &transform,
+                        ExifOrientationMode::IgnoreExifOrientation,
+                        ColorManagementMode::DoNotColorManage,
+                    )
+                    .map_err(|e| {
+                        AppError::ocr_decode(format!(
+                            "Failed to get downscaled software bitmap: {e}"
+                        ))
+                    })?
+                    .get()
+                    .map_err(|e| {
+                        AppError::ocr_decode(format!(
+                            "Downscaled software bitmap transform failed: {e}"
+                        ))
+                    })?;
+
+                let ocr_result = engine
+                    .RecognizeAsync(&bitmap)
+                    .map_err(|e| AppError::ocr(format!("Recognition execution failed: {e}")))?
+                    .get()
+                    .map_err(|e| {
+                        AppError::ocr(format!("OCR recognition result extraction error: {e}"))
+                    })?;
+
+                ocr_result
+                    .Text()
+                    .map_err(|e| AppError::ocr(format!("Failed to extract recognized text: {e}")))?
+                    .to_string()
+            }
+            OcrProcessingStrategy::VerticalTiling { tiles }
+            | OcrProcessingStrategy::HorizontalTiling { tiles } => {
+                let mut tile_texts = Vec::with_capacity(tiles.len());
+
+                for (idx, tile) in tiles.into_iter().enumerate() {
+                    let transform = BitmapTransform::new().map_err(|e| {
+                        AppError::ocr_decode(format!("Failed to create tile BitmapTransform: {e}"))
+                    })?;
+                    transform.SetBounds(tile.into()).map_err(|e| {
+                        AppError::ocr_decode(format!(
+                            "Failed to set tile bounds for tile {idx}: {e}"
+                        ))
+                    })?;
+
+                    let bitmap = decoder
+                        .GetSoftwareBitmapTransformedAsync(
+                            pixel_format,
+                            alpha_mode,
+                            &transform,
+                            ExifOrientationMode::IgnoreExifOrientation,
+                            ColorManagementMode::DoNotColorManage,
+                        )
+                        .map_err(|e| {
+                            AppError::ocr_decode(format!(
+                                "Failed to extract software bitmap for tile {idx}: {e}"
+                            ))
+                        })?
+                        .get()
+                        .map_err(|e| {
+                            AppError::ocr_decode(format!(
+                                "Tile software bitmap transform failed for tile {idx}: {e}"
+                            ))
+                        })?;
+
+                    let ocr_result = engine
+                        .RecognizeAsync(&bitmap)
+                        .map_err(|e| {
+                            AppError::ocr(format!("Recognition failed for tile {idx}: {e}"))
+                        })?
+                        .get()
+                        .map_err(|e| {
+                            AppError::ocr(format!("Result extraction failed for tile {idx}: {e}"))
+                        })?;
+
+                    let text = ocr_result
+                        .Text()
+                        .map_err(|e| {
+                            AppError::ocr(format!("Text extraction failed for tile {idx}: {e}"))
+                        })?
+                        .to_string();
+
+                    tile_texts.push(text);
+                }
+
+                merge_tile_texts(&tile_texts)
+            }
         };
-
-        // 4. Perform recognition using the pre-initialized engine
-        let ocr_result = engine
-            .RecognizeAsync(&bitmap)
-            .map_err(|e| AppError::ocr(format!("Recognition execution failed: {e}")))?
-            .get()
-            .map_err(|e| AppError::ocr(format!("OCR recognition result extraction error: {e}")))?;
-
-        let raw_text = ocr_result
-            .Text()
-            .map_err(|e| AppError::ocr(format!("Failed to extract recognized text: {e}")))?
-            .to_string();
 
         let normalized = normalize_ocr_text(&raw_text);
 

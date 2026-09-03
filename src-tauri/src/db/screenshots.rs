@@ -199,25 +199,19 @@ pub fn get_pending_screenshots(
         .prepare(query)
         .map_err(|e| AppError::database(format!("Failed to prepare pending query: {e}")))?;
 
+    let map_row = |row: &rusqlite::Row| {
+        Ok(PendingScreenshotItem {
+            id: row.get(0)?,
+            folder_id: row.get(1)?,
+            path: row.get(2)?,
+            filename: row.get(3)?,
+            extension: row.get(4)?,
+        })
+    };
+
     let rows = match folder_id {
-        Some(f_id) => stmt.query_map(params![f_id, limit as i64], |row| {
-            Ok(PendingScreenshotItem {
-                id: row.get(0)?,
-                folder_id: row.get(1)?,
-                path: row.get(2)?,
-                filename: row.get(3)?,
-                extension: row.get(4)?,
-            })
-        }),
-        None => stmt.query_map(params![limit as i64], |row| {
-            Ok(PendingScreenshotItem {
-                id: row.get(0)?,
-                folder_id: row.get(1)?,
-                path: row.get(2)?,
-                filename: row.get(3)?,
-                extension: row.get(4)?,
-            })
-        }),
+        Some(f_id) => stmt.query_map(params![f_id, limit as i64], map_row),
+        None => stmt.query_map(params![limit as i64], map_row),
     }
     .map_err(|e| AppError::database(format!("Failed to execute pending query: {e}")))?;
 

@@ -4,10 +4,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use std::sync::Arc;
+
 /// Thread-safe wrapper around the SQLite connection.
 /// Tauri manages this as application state.
+#[derive(Clone)]
 pub struct Database {
-    pub conn: Mutex<Connection>,
+    pub conn: Arc<Mutex<Connection>>,
 }
 
 /// Resolves the application data directory for ScreenshotSearch.
@@ -59,6 +62,6 @@ pub fn initialize(app_data_dir: &PathBuf) -> Result<Database, AppError> {
     super::migrations::run_migrations(&conn)?;
 
     Ok(Database {
-        conn: Mutex::new(conn),
+        conn: Arc::new(Mutex::new(conn)),
     })
 }

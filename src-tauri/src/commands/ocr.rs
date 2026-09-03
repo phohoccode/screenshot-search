@@ -38,14 +38,24 @@ pub async fn start_ocr_indexing(
 
     let cancel_flag = ocr_mgr.cancel_flag.clone();
     let app_clone = app.clone();
+    let db_clone = db.inner().clone();
 
     // Spawn execution off the async thread with RAII guard moved into the worker
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _running_guard = guard;
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
+        }
+
         let engine = WindowsMediaOcrEngine::new();
 
         let summary = run_ocr_batch(
-            &db,
+            &db_clone,
             &engine,
             folder_id,
             limit,
@@ -75,6 +85,11 @@ pub async fn start_ocr_indexing(
                 is_running: false,
             },
         );
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            windows::Win32::System::Com::CoUninitialize();
+        }
 
         summary
     })

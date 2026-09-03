@@ -50,7 +50,7 @@ mod tests {
         .expect("Failed to setup test database schema");
 
         Database {
-            conn: std::sync::Mutex::new(conn),
+            conn: std::sync::Arc::new(std::sync::Mutex::new(conn)),
         }
     }
 
@@ -460,5 +460,319 @@ mod tests {
             assert_eq!(stats_after.processing, 0);
             assert_eq!(stats_after.pending, 1);
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_windows_media_ocr_engine_creation() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+        let engine = WindowsMediaOcrEngine::new();
+        let info = engine.get_info();
+        println!("WINRT OCR ENGINE INFO: {:?}", info);
+        assert_eq!(info.engine_name, "windows_media_ocr");
+        assert!(info.max_image_dimension > 0);
+    }
+
+    #[test]
+    fn test_oversized_strategy_math() {
+        use crate::ocr::windows::{
+            determine_processing_strategy, OcrProcessingStrategy, SAFE_MAX_OCR_DIMENSION,
+        };
+
+        // 1. Normal image: 1920x1080
+        let s_1080p = determine_processing_strategy(1920, 1080, 10000);
+        assert_eq!(s_1080p, OcrProcessingStrategy::Direct);
+
+        // 2. 4K 3840x2160 (aspect ratio 1.78 <= 2.2, moderately oversized)
+        let s_4k = determine_processing_strategy(3840, 2160, 10000);
+        match s_4k {
+            OcrProcessingStrategy::ProportionalDownscale {
+                target_width,
+                target_height,
+            } => {
+                assert_eq!(target_width, SAFE_MAX_OCR_DIMENSION);
+                assert_eq!(target_height, 1463);
+            }
+            other => panic!("Expected ProportionalDownscale for 4K, got {:?}", other),
+        }
+
+        // 3. Super Ultra-wide 5120x1440 (aspect ratio 3.56 > 2.0)
+        let s_wide = determine_processing_strategy(5120, 1440, 10000);
+        match s_wide {
+            OcrProcessingStrategy::HorizontalTiling { tiles } => {
+                assert_eq!(tiles.len(), 3);
+                assert_eq!(tiles[0].x, 0);
+                assert_eq!(tiles[0].width, 2000);
+                assert_eq!(tiles[1].x, 1850);
+                assert_eq!(tiles[2].x, 3700);
+                assert_eq!(tiles[2].width, 1420);
+            }
+            other => panic!("Expected HorizontalTiling for 5120x1440, got {:?}", other),
+        }
+
+        // 4. Tall screenshot 1080x5200 (aspect ratio 4.81 > 2.0)
+        let s_tall = determine_processing_strategy(1080, 5200, 10000);
+        match s_tall {
+            OcrProcessingStrategy::VerticalTiling { tiles } => {
+                assert_eq!(tiles.len(), 3);
+                assert_eq!(tiles[0].y, 0);
+                assert_eq!(tiles[0].height, 2000);
+                assert_eq!(tiles[1].y, 1850);
+                assert_eq!(tiles[2].y, 3700);
+                assert_eq!(tiles[2].height, 1500);
+            }
+            other => panic!("Expected VerticalTiling for 1080x5200, got {:?}", other),
+        }
+
+        // 5. Extreme tall screenshot 1440x10000 (aspect ratio 6.94 > 2.0)
+        let s_extreme = determine_processing_strategy(1440, 10000, 10000);
+        match s_extreme {
+            OcrProcessingStrategy::VerticalTiling { tiles } => {
+                assert_eq!(tiles.len(), 6);
+                for tile in &tiles {
+                    assert!(tile.height <= 2000);
+                    assert_eq!(tile.width, 1440);
+                }
+            }
+            other => panic!("Expected VerticalTiling for 1440x10000, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_tile_texts_deduplication_and_order() {
+        use crate::ocr::windows::merge_tile_texts;
+
+        let tile_0 = vec![
+            "Header Navigation".to_string(),
+            "Welcome to the platform".to_string(),
+            "PrismaClientKnownRequestError".to_string(),
+            "Transaction alread".to_string(), // cut off at bottom of tile 0
+        ];
+        let tile_1 = vec![
+            "Transaction already closed".to_string(), // complete line in tile 1
+            "Error code: P2028".to_string(),
+            "localhost:3000".to_string(),
+        ];
+
+        let merged = merge_tile_texts(&[tile_0.join("\n"), tile_1.join("\n")]);
+        let lines: Vec<&str> = merged.lines().collect();
+
+        assert_eq!(lines[0], "Header Navigation");
+        assert_eq!(lines[1], "Welcome to the platform");
+        assert_eq!(lines[2], "PrismaClientKnownRequestError");
+        // Truncated line should be healed by fuller version:
+        assert_eq!(lines[3], "Transaction already closed");
+        assert_eq!(lines[4], "Error code: P2028");
+        assert_eq!(lines[5], "localhost:3000");
+        assert_eq!(lines.len(), 6);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn get_fixture_path(name: &str) -> std::path::PathBuf {
+        let direct = std::path::PathBuf::from("tests/fixtures").join(name);
+        if direct.exists() {
+            return direct;
+        }
+        let nested = std::path::PathBuf::from("src-tauri/tests/fixtures").join(name);
+        if nested.exists() {
+            return nested;
+        }
+        panic!("Fixture {} not found!", name);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_ocr_english_fixture() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+
+        let engine = WindowsMediaOcrEngine::new();
+        let p_en = get_fixture_path("english.png");
+        let res_en = engine.recognize(&p_en).expect("English OCR failed");
+        println!("EN OCR RESULT:\n{}", res_en.text);
+        assert!(
+            res_en.text.contains("Screenshot")
+                && res_en.text.contains("Search")
+                && res_en.text.contains("Hello")
+                && res_en.text.contains("World")
+                && res_en.text.contains("500"),
+            "English OCR did not extract expected tokens: {}",
+            res_en.text
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_ocr_vietnamese_fixture() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+
+        let engine = WindowsMediaOcrEngine::new();
+        let p_vi = get_fixture_path("vietnamese.png");
+        let res_vi = engine.recognize(&p_vi).expect("Vietnamese OCR failed");
+        println!("VI OCR RESULT (with en-US host engine):\n{}", res_vi.text);
+        assert!(
+            !res_vi.text.is_empty(),
+            "Vietnamese OCR returned empty text"
+        );
+        assert!(
+            res_vi.text.contains("Tim")
+                || res_vi.text.contains("chup")
+                || res_vi.text.contains("man")
+                || res_vi.text.contains("hinh")
+                || res_vi.text.contains("Thanh")
+                || res_vi.text.contains("toan")
+                || res_vi.text.contains("cong"),
+            "Vietnamese OCR token extraction failed: {}",
+            res_vi.text
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_ocr_mixed_technical_fixture() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+
+        let engine = WindowsMediaOcrEngine::new();
+        let p_tech = get_fixture_path("mixed_technical.png");
+        let res_tech = engine.recognize(&p_tech).expect("Technical OCR failed");
+        println!("TECH OCR RESULT:\n{}", res_tech.text);
+        assert!(
+            res_tech.text.contains("PrismaClientKnownRequestError")
+                && res_tech.text.contains("Transaction")
+                && res_tech.text.contains("closed")
+                && res_tech.text.contains("P2028"),
+            "Technical OCR tokens missing: {}",
+            res_tech.text
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_ocr_code_terminal_fixture() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+
+        let engine = WindowsMediaOcrEngine::new();
+        let p_code = get_fixture_path("code_terminal.png");
+        let res_code = engine.recognize(&p_code).expect("Code OCR failed");
+        println!("CODE OCR RESULT:\n{}", res_code.text);
+        assert!(
+            res_code.text.contains("npm")
+                && res_code.text.contains("build")
+                && (res_code.text.contains("ERR_MODULE_NOT_FOUND")
+                    || (res_code.text.contains("MODULE") && res_code.text.contains("FOUND")))
+                && res_code.text.contains("localhost"),
+            "Code OCR tokens missing: {}",
+            res_code.text
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_ocr_four_k_downscale_fixture() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+
+        let engine = WindowsMediaOcrEngine::new();
+        let p_4k = get_fixture_path("four_k_3840x2160.png");
+        let res_4k = engine.recognize(&p_4k).expect("4K OCR failed");
+        println!("4K OCR RESULT:\n{}", res_4k.text);
+        assert!(
+            res_4k.text.contains("3840")
+                && res_4k.text.contains("Downscaling")
+                && res_4k.text.contains("500"),
+            "4K downscaled OCR tokens missing: {}",
+            res_4k.text
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_ocr_tall_1080x5200_tiling_fixture() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+
+        let engine = WindowsMediaOcrEngine::new();
+        let p_tall = get_fixture_path("tall_1080x5200.png");
+        let res_tall = engine
+            .recognize(&p_tall)
+            .expect("Tall 1080x5200 OCR failed");
+        println!("TALL 1080x5200 OCR RESULT:\n{}", res_tall.text);
+        assert!(
+            res_tall.text.contains("HEADER")
+                && res_tall.text.contains("MIDDLE")
+                && res_tall.text.contains("LOWER")
+                && res_tall.text.contains("FOOTER"),
+            "Tall screenshot tiling failed to capture all sections: {}",
+            res_tall.text
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_ocr_wide_5120x1440_tiling_fixture() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+
+        let engine = WindowsMediaOcrEngine::new();
+        let p_wide = get_fixture_path("wide_5120x1440.png");
+        let res_wide = engine
+            .recognize(&p_wide)
+            .expect("Wide 5120x1440 OCR failed");
+        println!("WIDE 5120x1440 OCR RESULT:\n{}", res_wide.text);
+        assert!(
+            res_wide.text.contains("LEFT")
+                && res_wide.text.contains("CENTER")
+                && res_wide.text.contains("RIGHT"),
+            "Wide screenshot tiling failed to capture all columns: {}",
+            res_wide.text
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_benchmark_representative_samples() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+        use std::time::Instant;
+
+        let engine = WindowsMediaOcrEngine::new();
+
+        let samples = [
+            ("1080p Screenshot (1920x1080)", "bench_1080p.png"),
+            ("1440p Screenshot (2560x1440)", "bench_1440p.png"),
+            ("4K UHD Screenshot (3840x2160)", "four_k_3840x2160.png"),
+            (
+                "Long Scrolling Screenshot (1080x5200)",
+                "tall_1080x5200.png",
+            ),
+            ("Code/Terminal Screenshot (900x500)", "code_terminal.png"),
+        ];
+
+        println!("\n=================== EMPIRICAL OCR PERFORMANCE BENCHMARK ===================");
+        println!(
+            "{:<40} | {:<12} | {:<10}",
+            "Sample Name", "Latency (ms)", "Status"
+        );
+        println!("{:-<40}-|-{:-<12}-|-{:-<10}", "", "", "");
+
+        for (name, filename) in &samples {
+            let path = get_fixture_path(filename);
+            let start = Instant::now();
+            let res = engine.recognize(&path).expect("Recognition failed");
+            let elapsed = start.elapsed();
+
+            let words_count = res.text.split_whitespace().count();
+            println!(
+                "{:<40} | {:>9.2} ms | OK ({} words)",
+                name,
+                elapsed.as_secs_f64() * 1000.0,
+                words_count
+            );
+        }
+        println!("============================================================================\n");
     }
 }
