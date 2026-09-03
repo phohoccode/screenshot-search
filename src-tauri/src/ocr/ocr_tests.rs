@@ -1,14 +1,15 @@
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use crate::db::connection::Database;
     use crate::db::screenshots::{self, get_ocr_stats, insert_screenshot, update_screenshot};
     use crate::ocr::mock::MockOcrEngine;
     use crate::ocr::normalize::normalize_ocr_text;
-    use crate::ocr::orchestrator::run_ocr_batch;
+    use crate::ocr::orchestrator::{run_ocr_batch, OcrManager};
+    use crate::ocr::windows::calculate_downscaled_dimensions;
 
     fn setup_test_db() -> Database {
         let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
@@ -70,6 +71,159 @@ mod tests {
         assert!(!normalized.contains("\r\n"));
         // Multiple empty lines collapsed (at most one blank line)
         assert!(!normalized.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn test_aspect_ratio_downscaling_math() {
+        // Case 1: Standard 1080p within limit (2600) -> untouched
+        let (w1, h1) = calculate_downscaled_dimensions(1920, 1080, 2600);
+        assert_eq!(w1, 1920);
+        assert_eq!(h1, 1080);
+
+        // Case 2: 4K screenshot (3840x2160) -> downscaled to max_dim 2600, preserving aspect ratio
+        let (w2, h2) = calculate_downscaled_dimensions(3840, 2160, 2600);
+        assert_eq!(w2, 2600);
+        assert_eq!(h2, 1463);
+        let ratio_orig = 3840.0 / 2160.0;
+        let ratio_scaled = w2 as f64 / h2 as f64;
+        assert!((ratio_orig - ratio_scaled).abs() < 0.01);
+
+        // Case 3: Ultra-wide screenshot (5120x1440) -> downscaled
+        let (w3, h3) = calculate_downscaled_dimensions(5120, 1440, 2600);
+        assert_eq!(w3, 2600);
+        assert_eq!(h3, 731);
+
+        // Case 4: Long vertical scrolling page screenshot (1080x5200) -> height scaled down
+        let (w4, h4) = calculate_downscaled_dimensions(1080, 5200, 2600);
+        assert_eq!(w4, 540);
+        assert_eq!(h4, 2600);
+    }
+
+    #[test]
+    fn test_conditional_mark_processing_prevents_duplicate_claims() {
+        let db = setup_test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let id = insert_screenshot(
+            &conn,
+            1,
+            "C:\\Screenshots\\claim.png",
+            "claim.png",
+            "png",
+            100,
+            "time",
+            "hash",
+        )
+        .unwrap();
+
+        // First worker claims: must succeed
+        let claim1 = screenshots::mark_processing(&conn, id).unwrap();
+        assert!(
+            claim1,
+            "First worker should successfully claim the PENDING item"
+        );
+
+        // Second worker attempts to claim same screenshot: must return false
+        let claim2 = screenshots::mark_processing(&conn, id).unwrap();
+        assert!(
+            !claim2,
+            "Second worker must not claim an already PROCESSING item"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_start_single_flight_protection() {
+        let mgr = OcrManager::new();
+
+        // First attempt acquires the running guard
+        let guard1 = mgr.acquire_running_guard();
+        assert!(guard1.is_some(), "First start attempt should succeed");
+        assert!(mgr.is_active());
+
+        // Simultaneous second attempt fails
+        let guard2 = mgr.acquire_running_guard();
+        assert!(
+            guard2.is_none(),
+            "Second start attempt must be rejected while first is active"
+        );
+
+        // When guard1 is dropped, lock resets automatically via RAII
+        drop(guard1);
+        assert!(!mgr.is_active());
+
+        // Third attempt now succeeds
+        let guard3 = mgr.acquire_running_guard();
+        assert!(
+            guard3.is_some(),
+            "After guard is dropped, new batch can be started"
+        );
+    }
+
+    #[test]
+    fn test_cancellation_preserves_consistent_state() {
+        let db = setup_test_db();
+        let engine = MockOcrEngine::new("Text");
+
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_screenshot(
+                &conn,
+                1,
+                "C:\\Screenshots\\1.png",
+                "1.png",
+                "png",
+                100,
+                "t1",
+                "h1",
+            )
+            .unwrap();
+            insert_screenshot(
+                &conn,
+                1,
+                "C:\\Screenshots\\2.png",
+                "2.png",
+                "png",
+                100,
+                "t2",
+                "h2",
+            )
+            .unwrap();
+            insert_screenshot(
+                &conn,
+                1,
+                "C:\\Screenshots\\3.png",
+                "3.png",
+                "png",
+                100,
+                "t3",
+                "h3",
+            )
+            .unwrap();
+        }
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flag_clone = cancel_flag.clone();
+
+        // Progress callback cancels after the first item finishes
+        let callback = move |_total: usize, processed: usize, _succeeded: usize, _failed: usize| {
+            if processed == 1 {
+                cancel_flag_clone.store(true, Ordering::SeqCst);
+            }
+        };
+
+        let summary =
+            run_ocr_batch(&db, &engine, None, None, cancel_flag, Some(&callback)).unwrap();
+
+        // Only 1 was processed before cancel took effect
+        assert_eq!(summary.processed, 1);
+        assert_eq!(summary.succeeded, 1);
+
+        // Verify remaining items are still PENDING and NOT stuck in PROCESSING
+        let conn = db.conn.lock().unwrap();
+        let stats = get_ocr_stats(&conn).unwrap();
+        assert_eq!(stats.succeeded, 1);
+        assert_eq!(stats.pending, 2);
+        assert_eq!(stats.processing, 0);
     }
 
     #[test]

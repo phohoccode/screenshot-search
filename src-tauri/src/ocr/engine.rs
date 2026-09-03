@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::errors::AppError;
@@ -15,11 +16,26 @@ pub struct OcrResult {
     pub confidence: Option<f32>,
 }
 
+/// Metadata and language diagnostics for the active local OCR engine.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrEngineInfo {
+    pub engine_name: String,
+    pub engine_version: String,
+    pub active_language: String,
+    pub available_languages: Vec<String>,
+    pub supports_vietnamese: bool,
+    pub max_image_dimension: u32,
+}
+
 /// Abstract interface for local OCR engines.
 /// Decouples indexing orchestration and database persistence from specific OCR providers.
 pub trait OcrEngine: Send + Sync {
     /// Performs text recognition on an image at the given filesystem path.
     fn recognize(&self, image_path: &Path) -> Result<OcrResult, AppError>;
+
+    /// Returns diagnostic information about the engine, active language, and limits.
+    fn get_info(&self) -> OcrEngineInfo;
 
     /// Human-readable identifier of this engine.
     fn name(&self) -> &str;

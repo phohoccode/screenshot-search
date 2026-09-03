@@ -9,19 +9,23 @@ import {
   Loader2,
   ShieldCheck,
   FileCheck,
+  Languages,
+  Maximize2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
   getOcrStats,
+  getOcrEngineInfo,
   startOcrIndexing,
   cancelOcrIndexing,
   onOcrProgress,
 } from "@/lib/tauri";
-import type { OcrStats, OcrBatchSummary } from "@/types";
+import type { OcrStats, OcrBatchSummary, OcrEngineInfo } from "@/types";
 
 export function IndexingPage() {
   const [stats, setStats] = useState<OcrStats | null>(null);
+  const [engineInfo, setEngineInfo] = useState<OcrEngineInfo | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -41,6 +45,7 @@ export function IndexingPage() {
 
   useEffect(() => {
     refreshStats();
+    getOcrEngineInfo().then(setEngineInfo).catch(console.error);
 
     // Listen to real-time progress events from backend
     let unlisten: (() => void) | undefined;
@@ -249,6 +254,50 @@ export function IndexingPage() {
               )}
             </div>
           </div>
+
+          {/* Engine Diagnostics & Language Support */}
+          {engineInfo && (
+            <div className="rounded-lg border border-border bg-card p-4 space-y-3 text-xs">
+              <div className="flex items-center justify-between border-b border-border pb-2.5">
+                <div className="flex items-center gap-2 text-foreground font-medium">
+                  <Languages className="h-4 w-4 text-primary" />
+                  <span>OCR Engine &amp; Language Diagnostics</span>
+                </div>
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  {engineInfo.engineName} ({engineInfo.engineVersion})
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 text-muted-foreground">
+                <div className="flex items-center justify-between bg-muted/30 p-2 rounded">
+                  <span>Active Recognizer:</span>
+                  <span className="font-medium text-foreground font-mono">
+                    {engineInfo.activeLanguage}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between bg-muted/30 p-2 rounded">
+                  <span>Vietnamese (vi-VN):</span>
+                  {engineInfo.supportsVietnamese ? (
+                    <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                      Installed
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">
+                      Not installed in Windows
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 text-[11px] text-muted-foreground bg-muted/20 p-2 rounded">
+                <Maximize2 className="h-3.5 w-3.5 shrink-0 text-primary" />
+                <span>
+                  Max Dimension: {engineInfo.maxImageDimension}px. 4K and ultra-wide screenshots are automatically downscaled in-memory maintaining aspect ratio.
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Privacy & Engine Information */}
           <div className="rounded-lg border border-border bg-muted/20 p-4">

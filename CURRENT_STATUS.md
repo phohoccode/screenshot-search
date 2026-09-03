@@ -45,25 +45,23 @@ Source code, OCR abstraction (`OcrEngine`), Windows Media OCR WinRT implementati
 - **Hardened Deletion Reconciliation:** Subtree safety check prevents accidental record deletion during incomplete directory traversals.
 - **Unit & Integration Tests:** 6 comprehensive tests in `scanner_tests.rs`.
 
-### Phase 1C — Local OCR Pipeline
-- **OCR Engine Decision:** Evaluated Options A (Windows.Media.Ocr), B (PaddleOCR / ONNX), and C (Tesseract). Selected **Windows.Media.Ocr** (WinRT) as primary native engine (0 MB model download, ~25MB RAM, ~100ms/image CPU latency, pre-installed `en-US` and Vietnamese language pack support) documented in `docs/DECISIONS.md` (ADR-013).
-- **OCR Abstraction Trait:** Created `OcrEngine` trait and `OcrResult` struct in `src-tauri/src/ocr/engine.rs` ensuring the indexing layer remains completely decoupled from specific OCR engines.
+### Phase 1C — Local OCR Pipeline (Audited & Hardened)
+- **OCR Engine Decision:** Evaluated Options A (Windows.Media.Ocr), B (PaddleOCR / ONNX), and C (Tesseract). Selected **Windows.Media.Ocr** (WinRT) as primary native engine (0 MB model download, hardware-accelerated CPU execution) documented in `docs/DECISIONS.md` (ADR-013).
+- **Oversized Image Downscaling:** Hardened against `OcrEngine.MaxImageDimension` limits (2,600px). Pre-inspects image width and height via `BitmapDecoder`; if oversized (e.g. 4K 3840x2160, ultra-wide 5120x1440), automatically calculates aspect-ratio-preserving dimensions and downscales in-memory using `BitmapTransform` with `BitmapInterpolationMode::Fant`. Original screenshot files on disk are strictly untouched.
+- **Engine Reuse:** Native WinRT engine is pre-initialized on creation and reused across all screenshots rather than re-creating per image.
+- **Language Diagnostics:** Added `get_ocr_engine_info` detecting active language and whether Vietnamese (`vi-VN`) is installed. UI explicitly indicates language status rather than silently claiming Vietnamese support.
+- **Claim Race & Single-Flight Protection:**
+  - `mark_processing` uses atomic conditional update `WHERE id = ?1 AND ocr_status = 'PENDING'` preventing duplicate claims across concurrent workers.
+  - `start_ocr_indexing` uses atomic CAS with an RAII `RunningGuard` ensuring the lock is always reset upon completion or panic.
 - **Text Normalizer:** Created `normalize_ocr_text` in `src-tauri/src/ocr/normalize.rs` applying Unicode NFC, standardizing line endings (`\n`), stripping control characters, collapsing multiple blank lines, and strictly preserving technical tokens (`P2028`, `ERR_CONNECTION_REFUSED`), URLs, code snippets, and punctuation.
-- **Engine Implementations:**
-  - `WindowsMediaOcrEngine` in `src-tauri/src/ocr/windows.rs`: Native WinRT OCR via `windows` crate with graceful fallbacks.
-  - `MockOcrEngine` in `src-tauri/src/ocr/mock.rs`: Deterministic mock for automated test suites.
-- **Worker Orchestration & Concurrency:**
-  - `OcrManager` and `run_ocr_batch` in `src-tauri/src/ocr/orchestrator.rs`: Runs background batches outside UI threads with bounded concurrency (1 worker).
-  - Short SQLite transactions: Database lock is released during image recognition.
-  - Graceful cancellation support via `AtomicBool`.
 - **Lifecycle & Invariants:**
   - `PENDING` → `PROCESSING` → `SUCCEEDED` or `FAILED`.
   - Empty image text is marked `SUCCEEDED` with `ocr_text = ""` to prevent infinite re-processing loops.
   - File modification in Phase 1B resets to `PENDING` with `ocr_text = NULL`.
   - Startup crash recovery: Automatically resets stale `PROCESSING` jobs to `PENDING` during app setup.
-- **Unit & Integration Tests:** Comprehensive tests in `src-tauri/src/ocr/ocr_tests.rs` covering successful extraction, failure isolation, empty text, unchanged skip, modified re-process, crash recovery, and technical token normalization.
+- **Unit & Integration Tests:** 11 comprehensive tests in `src-tauri/src/ocr/ocr_tests.rs` covering downscaling math, conditional claims, single-flight guard, cancellation, successful extraction, failure isolation, empty text, unchanged skip, modified re-process, crash recovery, and technical token normalization.
 - **Indexing UI:**
-  - Redesigned `IndexingPage` with real progress bar, metric cards (`Total`, `Succeeded`, `Pending`, `Failed`), `Start OCR` / `Stop OCR` buttons with loading spinners, and real-time progress updates via Tauri events.
+  - `IndexingPage` displays progress bar, metric cards (`Total`, `Succeeded`, `Pending`, `Failed`), `Start OCR` / `Stop OCR` buttons with loading spinners, engine diagnostics (active language, Vietnamese support status, max dimension), and zero-cloud privacy notice.
   - Updated `FoldersPage` to show OCR indexed counts on folder cards.
   - Updated `SearchPage` with OCR readiness stats and Phase 1D FTS5 search placeholder.
 

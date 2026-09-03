@@ -6,6 +6,7 @@ import type {
   OcrStats,
   OcrBatchSummary,
   OcrProgressPayload,
+  OcrEngineInfo,
   AppError,
 } from "@/types";
 
@@ -189,6 +190,21 @@ export async function cancelOcrIndexing(): Promise<boolean> {
   }
   mockOcrStats.processing = 0;
   return true;
+}
+
+/** Retrieves diagnostic information about the local OCR engine */
+export async function getOcrEngineInfo(): Promise<OcrEngineInfo> {
+  if (isTauri()) {
+    return await invoke<OcrEngineInfo>("get_ocr_engine_info");
+  }
+  return {
+    engineName: "windows_media_ocr",
+    engineVersion: "winrt_v1",
+    activeLanguage: "en-US",
+    availableLanguages: ["en-US"],
+    supportsVietnamese: false,
+    maxImageDimension: 2600,
+  };
 }
 
 /** Listens to real-time OCR progress updates */

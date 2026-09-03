@@ -69,6 +69,17 @@ impl OcrEngine for MockOcrEngine {
         })
     }
 
+    fn get_info(&self) -> super::engine::OcrEngineInfo {
+        super::engine::OcrEngineInfo {
+            engine_name: self.name().to_string(),
+            engine_version: self.version().to_string(),
+            active_language: "en-US".to_string(),
+            available_languages: vec!["en-US".to_string(), "vi-VN".to_string()],
+            supports_vietnamese: true,
+            max_image_dimension: 2600,
+        }
+    }
+
     fn name(&self) -> &str {
         "mock_ocr"
     }

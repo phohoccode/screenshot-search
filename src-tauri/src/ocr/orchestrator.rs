@@ -21,6 +21,15 @@ pub struct OcrBatchSummary {
     pub duration_ms: u64,
 }
 
+/// RAII guard ensuring `is_running` is reset to false upon completion, error, or panic.
+pub struct RunningGuard(pub Arc<AtomicBool>);
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Thread-safe manager for tracking background OCR indexing execution and cancellation.
 #[derive(Clone)]
 pub struct OcrManager {
@@ -42,6 +51,20 @@ impl OcrManager {
         Self::default()
     }
 
+    /// Attempts to acquire the single-flight running lock.
+    /// Returns `Some(RunningGuard)` if acquired, or `None` if an OCR job is already running.
+    pub fn acquire_running_guard(&self) -> Option<RunningGuard> {
+        if self
+            .is_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            Some(RunningGuard(self.is_running.clone()))
+        } else {
+            None
+        }
+    }
+
     pub fn request_cancel(&self) {
         self.cancel_flag.store(true, Ordering::SeqCst);
     }
@@ -56,8 +79,9 @@ impl OcrManager {
 /// Invariants strictly enforced:
 /// 1. Crash recovery: Stale `PROCESSING` jobs are recovered back to `PENDING`.
 /// 2. Short transactions: SQLite lock is released during image recognition.
-/// 3. Per-file isolation: Single-file OCR failure does not abort the batch.
-/// 4. Graceful cancellation: Checks `cancel_flag` between images.
+/// 3. Claim race protection: Items are claimed with atomic `WHERE ocr_status = 'PENDING'`.
+/// 4. Per-file isolation: Single-file OCR failure does not abort the batch.
+/// 5. Graceful cancellation: Checks `cancel_flag` between images; in-flight image finishes cleanly.
 pub fn run_ocr_batch(
     db: &Database,
     engine: &dyn OcrEngine,
@@ -107,19 +131,31 @@ pub fn run_ocr_batch(
 
     // 3. Process each screenshot sequentially outside long DB locks
     for item in pending_items {
-        // Check cancellation
+        // Check cancellation before claiming next item
         if cancel_flag.load(Ordering::Relaxed) {
-            log::info!("OCR indexing cancelled by user request");
+            log::info!(
+                "OCR indexing cancelled by user request; stopping before item id {}",
+                item.id
+            );
             break;
         }
 
-        // Mark as PROCESSING in SQLite
-        {
+        // Atomically claim as PROCESSING in SQLite (prevents race conditions with other workers)
+        let claimed = {
             let conn = db
                 .conn
                 .lock()
                 .map_err(|e| AppError::database(format!("Failed to acquire DB lock: {e}")))?;
-            let _ = screenshots::mark_processing(&conn, item.id);
+            screenshots::mark_processing(&conn, item.id)?
+        };
+
+        if !claimed {
+            // Already claimed by another worker or no longer PENDING; skip safely
+            log::debug!(
+                "Screenshot id {} was already claimed or updated; skipping",
+                item.id
+            );
+            continue;
         }
 
         // Run OCR recognition (LONG-RUNNING STEP - RUNS WITHOUT DB LOCK)

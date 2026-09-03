@@ -4,6 +4,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::db::connection::Database;
 use crate::db::screenshots::{self, OcrStats};
 use crate::errors::{AppError, CommandResult};
+use crate::ocr::engine::{OcrEngine, OcrEngineInfo};
 use crate::ocr::orchestrator::{run_ocr_batch, OcrBatchSummary, OcrManager};
 use crate::ocr::windows::WindowsMediaOcrEngine;
 
@@ -19,7 +20,7 @@ pub struct OcrProgressPayload {
 }
 
 /// Starts local OCR indexing for pending screenshots.
-/// Runs in a background worker with bounded concurrency without freezing the UI.
+/// Protected by an atomic single-flight CAS guard and RAII cleanup.
 #[tauri::command]
 pub async fn start_ocr_indexing(
     app: AppHandle,
@@ -28,25 +29,19 @@ pub async fn start_ocr_indexing(
     folder_id: Option<i64>,
     limit: Option<usize>,
 ) -> CommandResult<OcrBatchSummary> {
-    // Ensure only one batch is running
-    if ocr_mgr
-        .is_running
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err(AppError::ocr(
-            "An OCR indexing job is already running in the background",
-        ));
-    }
+    // Acquire single-flight lock; fails immediately if another batch is active
+    let guard = ocr_mgr
+        .acquire_running_guard()
+        .ok_or_else(|| AppError::ocr("An OCR indexing job is already running in the background"))?;
 
     ocr_mgr.cancel_flag.store(false, Ordering::SeqCst);
 
-    let is_running_flag = ocr_mgr.is_running.clone();
     let cancel_flag = ocr_mgr.cancel_flag.clone();
     let app_clone = app.clone();
 
-    // Spawn execution off the async thread
+    // Spawn execution off the async thread with RAII guard moved into the worker
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let _running_guard = guard;
         let engine = WindowsMediaOcrEngine::new();
 
         let summary = run_ocr_batch(
@@ -68,8 +63,6 @@ pub async fn start_ocr_indexing(
                 );
             }),
         );
-
-        is_running_flag.store(false, Ordering::SeqCst);
 
         // Emit final completed progress state
         let _ = app_clone.emit(
@@ -100,6 +93,13 @@ pub fn get_ocr_stats(db: State<'_, Database>) -> CommandResult<OcrStats> {
         .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
     screenshots::get_ocr_stats(&conn)
+}
+
+/// Retrieves active OCR engine diagnostics, language packs, and dimensions.
+#[tauri::command]
+pub fn get_ocr_engine_info() -> CommandResult<OcrEngineInfo> {
+    let engine = WindowsMediaOcrEngine::new();
+    Ok(engine.get_info())
 }
 
 /// Requests graceful cancellation of the ongoing OCR indexing batch.

@@ -231,17 +231,19 @@ pub fn get_pending_screenshots(
     Ok(items)
 }
 
-/// Marks a screenshot as `PROCESSING`.
-pub fn mark_processing(conn: &Connection, id: i64) -> Result<(), AppError> {
-    conn.execute(
-        "UPDATE screenshots 
-         SET ocr_status = 'PROCESSING', updated_at = datetime('now') 
-         WHERE id = ?1",
-        params![id],
-    )
-    .map_err(|e| AppError::database(format!("Failed to mark screenshot processing: {e}")))?;
+/// Atomically claims a screenshot for processing by transitioning it from `PENDING` to `PROCESSING`.
+/// Returns `Ok(true)` if claimed successfully, or `Ok(false)` if already claimed or no longer pending.
+pub fn mark_processing(conn: &Connection, id: i64) -> Result<bool, AppError> {
+    let affected = conn
+        .execute(
+            "UPDATE screenshots 
+             SET ocr_status = 'PROCESSING', updated_at = datetime('now') 
+             WHERE id = ?1 AND ocr_status = 'PENDING'",
+            params![id],
+        )
+        .map_err(|e| AppError::database(format!("Failed to mark screenshot processing: {e}")))?;
 
-    Ok(())
+    Ok(affected == 1)
 }
 
 /// Persists successful OCR text and updates status to `SUCCEEDED`.

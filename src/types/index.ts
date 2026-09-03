@@ -56,6 +56,16 @@ export interface OcrProgressPayload {
   isRunning: boolean;
 }
 
+/** Diagnostic info about the active local OCR engine and language support */
+export interface OcrEngineInfo {
+  engineName: string;
+  engineVersion: string;
+  activeLanguage: string;
+  availableLanguages: string[];
+  supportsVietnamese: boolean;
+  maxImageDimension: number;
+}
+
 /** Error response from Tauri commands */
 export interface AppError {
   code: ErrorCode;

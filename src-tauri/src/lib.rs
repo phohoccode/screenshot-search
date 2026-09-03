@@ -28,6 +28,7 @@ pub fn run() {
             commands::get_total_screenshot_count,
             commands::start_ocr_indexing,
             commands::get_ocr_stats,
+            commands::get_ocr_engine_info,
             commands::cancel_ocr_indexing,
         ])
         .setup(|app| {
