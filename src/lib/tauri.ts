@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Folder, ScanSummary, AppError } from "@/types";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  Folder,
+  ScanSummary,
+  OcrStats,
+  OcrBatchSummary,
+  OcrProgressPayload,
+  AppError,
+} from "@/types";
 
 /** Detects if the app is running inside a Tauri native window */
 export function isTauri(): boolean {
@@ -17,8 +25,17 @@ let mockFolders: Folder[] = [
     updatedAt: new Date(Date.now() - 3600000).toISOString(),
     lastScannedAt: new Date(Date.now() - 1800000).toISOString(),
     screenshotCount: 142,
+    ocrSucceededCount: 120,
   },
 ];
+
+let mockOcrStats: OcrStats = {
+  total: 142,
+  pending: 22,
+  processing: 0,
+  succeeded: 120,
+  failed: 0,
+};
 
 /** Lists all registered screenshot folders */
 export async function listFolders(): Promise<Folder[]> {
@@ -39,7 +56,9 @@ export async function addFolder(
 
   // Web fallback simulation
   const normalized = path.replace(/\//g, "\\");
-  if (mockFolders.some((f) => f.path.toLowerCase() === normalized.toLowerCase())) {
+  if (
+    mockFolders.some((f) => f.path.toLowerCase() === normalized.toLowerCase())
+  ) {
     const error: AppError = {
       code: "FOLDER_ALREADY_EXISTS",
       message: `Folder is already registered: ${normalized}`,
@@ -56,6 +75,7 @@ export async function addFolder(
     updatedAt: new Date().toISOString(),
     lastScannedAt: null,
     screenshotCount: 0,
+    ocrSucceededCount: 0,
   };
   mockFolders.unshift(newFolder);
   return newFolder;
@@ -83,11 +103,13 @@ export async function scanFolder(id: number): Promise<ScanSummary> {
   if (folder) {
     folder.screenshotCount += 15;
     folder.lastScannedAt = new Date().toISOString();
+    mockOcrStats.total += 15;
+    mockOcrStats.pending += 15;
   }
 
   return {
     folderId: id,
-    discovered: (folder?.screenshotCount ?? 15),
+    discovered: folder?.screenshotCount ?? 15,
     added: 15,
     updated: 0,
     unchanged: (folder?.screenshotCount ?? 15) - 15,
@@ -116,4 +138,68 @@ export async function getTotalScreenshotCount(): Promise<number> {
     return await invoke<number>("get_total_screenshot_count");
   }
   return mockFolders.reduce((sum, f) => sum + f.screenshotCount, 0);
+}
+
+/** Starts OCR indexing on pending screenshots */
+export async function startOcrIndexing(
+  folderId?: number,
+  limit?: number
+): Promise<OcrBatchSummary> {
+  if (isTauri()) {
+    return await invoke<OcrBatchSummary>("start_ocr_indexing", {
+      folderId: folderId ?? null,
+      limit: limit ?? null,
+    });
+  }
+
+  // Web browser preview simulation
+  mockOcrStats.processing = 1;
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+
+  const count = mockOcrStats.pending;
+  mockOcrStats.succeeded += count;
+  mockOcrStats.pending = 0;
+  mockOcrStats.processing = 0;
+
+  for (const f of mockFolders) {
+    f.ocrSucceededCount = f.screenshotCount;
+  }
+
+  return {
+    totalCandidates: count,
+    processed: count,
+    succeeded: count,
+    failed: 0,
+    durationMs: 1200,
+  };
+}
+
+/** Retrieves aggregated OCR metrics */
+export async function getOcrStats(): Promise<OcrStats> {
+  if (isTauri()) {
+    return await invoke<OcrStats>("get_ocr_stats");
+  }
+  return { ...mockOcrStats };
+}
+
+/** Requests cancellation of the ongoing OCR indexing batch */
+export async function cancelOcrIndexing(): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("cancel_ocr_indexing");
+  }
+  mockOcrStats.processing = 0;
+  return true;
+}
+
+/** Listens to real-time OCR progress updates */
+export async function onOcrProgress(
+  callback: (payload: OcrProgressPayload) => void
+): Promise<UnlistenFn> {
+  if (isTauri()) {
+    return await listen<OcrProgressPayload>("ocr_progress", (event) => {
+      callback(event.payload);
+    });
+  }
+  // Web preview: no-op unlisten
+  return () => {};
 }

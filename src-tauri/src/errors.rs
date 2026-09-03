@@ -19,6 +19,10 @@ pub enum ErrorCode {
     FileMetadataFailed,
     FileHashFailed,
     OcrFailed,
+    OcrEngineUnavailable,
+    OcrImageDecodeFailed,
+    OcrRecognitionFailed,
+    OcrModelLoadFailed,
     IndexJobFailed,
     SettingsFailed,
     Unknown,
@@ -70,6 +74,18 @@ impl AppError {
 
     pub fn scan_failed(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::FolderScanFailed, message)
+    }
+
+    pub fn ocr(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::OcrFailed, message)
+    }
+
+    pub fn ocr_decode(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::OcrImageDecodeFailed, message)
+    }
+
+    pub fn ocr_unavailable(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::OcrEngineUnavailable, message)
     }
 }
 

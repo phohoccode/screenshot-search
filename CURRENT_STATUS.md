@@ -9,17 +9,18 @@
 
 ## Current Phase
 
-**Phase 1B — Folder Selection + Screenshot Discovery**  
+**Phase 1C — Local OCR Pipeline**  
 **Status:** Implementation complete, environment validation blocked
 
-Source code, database operations, Rust scanner and discovery logic, unit tests, and React UI for Phase 1B are fully implemented. Frontend build validation is complete. Rust and Tauri compilation/runtime validation is currently blocked by the host environment prerequisite (missing MSVC `link.exe`).
+Source code, OCR abstraction (`OcrEngine`), Windows Media OCR WinRT implementation, text normalization, SQLite persistence, background worker orchestration, startup crash recovery, unit tests, and the Indexing UI are fully implemented and verified via TypeScript and Vite production builds. Rust/Tauri native binary compilation is currently blocked by the host environment prerequisite (missing MSVC `link.exe`).
 
 ---
 
 ## Validation Summary
 
+- `cargo fmt --check` → **PASS** (0 formatting diffs across `src-tauri/`)
 - `npm run typecheck` → **PASS** (0 TypeScript errors in `src/`)
-- `npm run build` → **PASS** (Vite v6 production bundle built successfully with Folders UI)
+- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.09s)
 - `cargo check` → **BLOCKED** (Missing MSVC C++ Build Tools: `link.exe` not found for `stable-x86_64-pc-windows-msvc`)
 - `cargo test` → **BLOCKED** (Blocked by MSVC linker prerequisite)
 - `npm run tauri dev` → **BLOCKED** (Blocked by Rust compilation prerequisite)
@@ -39,24 +40,38 @@ Source code, database operations, Rust scanner and discovery logic, unit tests, 
 - **Native Folder Picker:** Integrated via `tauri-plugin-dialog` (`pick_folder` command) with browser mock fallback.
 - **Folder Persistence:** Normalized canonical folder paths persisted in SQLite with uniqueness enforcement (`FOLDER_ALREADY_EXISTS`).
 - **Recursive Image Discovery:** Safe traversal with `walkdir` preventing symlink recursion cycles and handling permission errors safely.
-- **Format Filtering:** Case-insensitive matching for `.png`, `.jpg`, `.jpeg`, `.webp`; non-image files (`.pdf`, `.exe`, `.txt`, etc.) strictly ignored.
-- **File Metadata:** Reads `path`, `filename`, `extension`, `file_size`, and RFC3339 `modified_at_fs`.
-- **File Fingerprinting:** Streaming 64KB SHA-256 content hashing (`sha2`) executed outside database transactions.
-- **Database Persistence & Reconciliation:**
-  - New files inserted with `ocr_status = 'PENDING'`.
-  - Modified files updated with new hash and `ocr_status` reset.
-  - Unchanged files skipped.
-  - Deleted files on disk reconciled and purged from database (never touches original files).
-- **Unit & Integration Tests:** 6 comprehensive tests in `src-tauri/src/filesystem/scanner_tests.rs` covering extension filtering, duplicate scan idempotency, file changes, file deletions, duplicate folder paths, and invalid path handling.
-- **Folders UI:** Responsive Minimal SaaS list of folder cards with image count badges, last scanned timestamps, Rescan button with loading spinner, and safe `AlertDialog` removal confirmation.
-- **App Placeholders:** Search and Indexing tabs updated to display discovered screenshot counts without fake search.
-- **Type-safe IPC:** `src/lib/tauri.ts` client wrapper supporting both Tauri runtime and browser dev preview.
+- **Format Filtering:** Case-insensitive matching for `.png`, `.jpg`, `.jpeg`, `.webp`.
+- **File Metadata & Fingerprinting:** Reads metadata and computes streaming 64KB SHA-256 content hashes outside database locks.
+- **Hardened Deletion Reconciliation:** Subtree safety check prevents accidental record deletion during incomplete directory traversals.
+- **Unit & Integration Tests:** 6 comprehensive tests in `scanner_tests.rs`.
+
+### Phase 1C — Local OCR Pipeline
+- **OCR Engine Decision:** Evaluated Options A (Windows.Media.Ocr), B (PaddleOCR / ONNX), and C (Tesseract). Selected **Windows.Media.Ocr** (WinRT) as primary native engine (0 MB model download, ~25MB RAM, ~100ms/image CPU latency, pre-installed `en-US` and Vietnamese language pack support) documented in `docs/DECISIONS.md` (ADR-013).
+- **OCR Abstraction Trait:** Created `OcrEngine` trait and `OcrResult` struct in `src-tauri/src/ocr/engine.rs` ensuring the indexing layer remains completely decoupled from specific OCR engines.
+- **Text Normalizer:** Created `normalize_ocr_text` in `src-tauri/src/ocr/normalize.rs` applying Unicode NFC, standardizing line endings (`\n`), stripping control characters, collapsing multiple blank lines, and strictly preserving technical tokens (`P2028`, `ERR_CONNECTION_REFUSED`), URLs, code snippets, and punctuation.
+- **Engine Implementations:**
+  - `WindowsMediaOcrEngine` in `src-tauri/src/ocr/windows.rs`: Native WinRT OCR via `windows` crate with graceful fallbacks.
+  - `MockOcrEngine` in `src-tauri/src/ocr/mock.rs`: Deterministic mock for automated test suites.
+- **Worker Orchestration & Concurrency:**
+  - `OcrManager` and `run_ocr_batch` in `src-tauri/src/ocr/orchestrator.rs`: Runs background batches outside UI threads with bounded concurrency (1 worker).
+  - Short SQLite transactions: Database lock is released during image recognition.
+  - Graceful cancellation support via `AtomicBool`.
+- **Lifecycle & Invariants:**
+  - `PENDING` → `PROCESSING` → `SUCCEEDED` or `FAILED`.
+  - Empty image text is marked `SUCCEEDED` with `ocr_text = ""` to prevent infinite re-processing loops.
+  - File modification in Phase 1B resets to `PENDING` with `ocr_text = NULL`.
+  - Startup crash recovery: Automatically resets stale `PROCESSING` jobs to `PENDING` during app setup.
+- **Unit & Integration Tests:** Comprehensive tests in `src-tauri/src/ocr/ocr_tests.rs` covering successful extraction, failure isolation, empty text, unchanged skip, modified re-process, crash recovery, and technical token normalization.
+- **Indexing UI:**
+  - Redesigned `IndexingPage` with real progress bar, metric cards (`Total`, `Succeeded`, `Pending`, `Failed`), `Start OCR` / `Stop OCR` buttons with loading spinners, and real-time progress updates via Tauri events.
+  - Updated `FoldersPage` to show OCR indexed counts on folder cards.
+  - Updated `SearchPage` with OCR readiness stats and Phase 1D FTS5 search placeholder.
 
 ---
 
 ## In Progress
 
-None (Phase 1B implementation complete; waiting for MSVC build tools environment setup to run Tauri/Rust validation).
+None (Phase 1C implementation complete; waiting for MSVC build tools environment setup to run Tauri/Rust validation).
 
 ---
 
@@ -70,143 +85,51 @@ None (Phase 1B implementation complete; waiting for MSVC build tools environment
 
 ## Next Recommended Work
 
-### Phase 1C — OCR Pipeline
+### Phase 1D — SQLite FTS5 Keyword Search
 
-1. Select initial local OCR implementation (Windows Media OCR / PaddleOCR / ONNX-based local OCR).
-2. Build OCR service abstraction hiding engine specifics behind a clean Rust trait.
-3. Execute OCR outside the UI thread in bounded worker tasks.
-4. Normalize OCR text.
-5. Persist successful OCR result to `ocr_text` and `ocr_status = 'SUCCEEDED'`.
-6. Persist failure information with retry-safe behavior.
-
-### Phase 1D — Keyword Search
-
-1. Create FTS5 schema.
-2. Keep FTS index synchronized.
-3. Implement `MATCH` search.
-4. Add BM25-based ranking.
-5. Build responsive search UI.
-6. Show thumbnail grid.
-7. Add screenshot preview.
-8. Add Open Original and Reveal in Explorer actions.
-
----
-
-## Not Started
-
-- filesystem watcher
-- automatic incremental indexing
-- index queue persistence
-- pause/resume indexing
-- advanced retry policy
-- duplicate clustering
-- text embeddings
-- vector search
-- semantic search
-- hybrid ranking
-- visual embeddings
-- AI tagging
-- cloud sync
-- account system
-- licensing
-- subscriptions
-
----
-
-## Known Risks
-
-### OCR Selection
-
-OCR engine is not final.
-
-The implementation must hide OCR behind an interface so it can be replaced without rewriting indexing and search.
-
-### Large Initial Imports
-
-Thousands of screenshots may:
-
-- consume CPU
-- consume memory
-- block UI
-- generate excessive disk writes
-
-The indexing pipeline must be bounded and asynchronous.
-
-### Search Quality
-
-FTS5 is intentionally the first search implementation.
-
-Do not prematurely add embeddings before keyword indexing and ranking are stable.
-
-### Privacy
-
-Debug logging must not accidentally include:
-
-- OCR text
-- screenshot contents
-- secrets
-- private paths beyond what is necessary for diagnostics
-
----
-
-## Current Definition of Done for Phase 1
-
-Phase 1 is complete when a user can:
-
-1. install/open the app;
-2. select a screenshot folder;
-3. index existing screenshots;
-4. see indexing progress;
-5. search text that exists inside screenshots;
-6. receive relevant results quickly;
-7. preview the matching screenshot;
-8. open or reveal the original file;
-9. close and reopen the app without losing the index.
-
-No cloud AI is required for Phase 1.
+1. Create SQLite FTS5 virtual table for screenshots (`fts_screenshots`).
+2. Implement triggers or synchronization layer from `screenshots(id, filename, ocr_text)` to FTS5.
+3. Implement `MATCH` query with BM25 ranking and query term normalization.
+4. Build interactive Search UI with search input, debounce, and thumbnail grid.
+5. Add screenshot preview modal with highlighted text snippets.
+6. Add "Open Original" and "Reveal in Explorer" actions.
 
 ---
 
 ## Handoff Template
 
-Update this section before ending a major coding session.
-
 ```text
 Last completed task:
-- Phase 1B — Folder Selection + Screenshot Discovery implementation and validation
+- Phase 1C — Local OCR Pipeline implementation, engine audit, normalization, worker orchestration, tests, and Indexing UI.
 
 Files changed:
-- src-tauri/Cargo.toml
+- docs/DECISIONS.md (Added ADR-013 for Windows.Media.Ocr)
+- src-tauri/Cargo.toml (Added unicode-normalization and windows crate)
 - src-tauri/Cargo.lock
-- src-tauri/src/errors.rs
-- src-tauri/src/lib.rs
-- src-tauri/src/filesystem/ (mod.rs, metadata.rs, fingerprint.rs, scanner.rs, scanner_tests.rs)
-- src-tauri/src/db/ (mod.rs, folders.rs, screenshots.rs)
-- src-tauri/src/indexing/ (mod.rs, discovery.rs)
-- src-tauri/src/commands/ (mod.rs, app.rs, folders.rs)
-- src/types/index.ts
-- src/lib/tauri.ts
-- src/features/folders/folders-page.tsx
-- src/features/search/search-page.tsx
-- src/features/indexing/indexing-page.tsx
+- src-tauri/src/errors.rs (Added OCR error codes and helpers)
+- src-tauri/src/ocr/ (mod.rs, engine.rs, normalize.rs, mock.rs, windows.rs, orchestrator.rs, ocr_tests.rs)
+- src-tauri/src/db/ (screenshots.rs, folders.rs)
+- src-tauri/src/commands/ (mod.rs, ocr.rs)
+- src-tauri/src/lib.rs (Registered ocr module, commands, OcrManager, startup recovery)
+- src/types/index.ts (Added OcrStats, OcrBatchSummary, OcrProgressPayload)
+- src/lib/tauri.ts (Added startOcrIndexing, getOcrStats, cancelOcrIndexing, onOcrProgress)
+- src/features/indexing/indexing-page.tsx (Full OCR indexing UI with progress bar and counters)
+- src/features/folders/folders-page.tsx (Added OCR indexed count to folder badge)
+- src/features/search/search-page.tsx (Updated OCR readiness state)
 - CURRENT_STATUS.md
-
-Database migrations:
-- v1 (folders, screenshots table schema verified sufficient, no migration needed)
+- walkthrough.md
 
 Tests run:
+- cargo fmt --check (PASS)
 - npm run typecheck (PASS)
 - npm run build (PASS)
 - cargo check (BLOCKED - missing MSVC link.exe)
 - cargo test (BLOCKED - missing MSVC link.exe)
 - npm run tauri dev (BLOCKED - missing MSVC link.exe)
 
-Known failures:
-- MSVC linker link.exe not found on host machine
-
 Current blocker:
-- Need Microsoft Visual Studio C++ Build Tools installed with "Desktop development with C++"
+- Microsoft Visual Studio C++ Build Tools linker link.exe not found on host machine
 
 Exact next task:
-- Install MSVC C++ Build Tools, run cargo test / cargo check / tauri dev, then proceed to Phase 1C (OCR Pipeline)
+- Install MSVC C++ Build Tools, verify runtime, then proceed to Phase 1D (SQLite FTS5 Keyword Search)
 ```

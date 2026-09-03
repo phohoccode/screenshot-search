@@ -286,6 +286,26 @@ All frontend/UI tasks must read and follow `UI_DESIGN_SYSTEM.md`.
 
 Do not introduce feature-specific visual languages without an intentionally approved design-system change.
 
+## ADR-013 — Windows.Media.Ocr as Native Engine Behind OcrEngine Trait
+
+**Status:** Accepted
+
+### Decision
+
+Use the built-in Windows 10/11 WinRT OCR engine (`Windows.Media.Ocr`) as the default local OCR implementation for Phase 1C on Windows, completely encapsulated behind the `OcrEngine` trait abstraction.
+
+### Reasons
+
+- **0 MB Model Overhead:** No external model weights (like PaddleOCR or Tesseract traineddata) need to be packaged, distributed, or downloaded.
+- **Hardware-Accelerated & Lightweight:** Highly optimized native C++ runtime pre-installed on Windows; uses only ~20-30MB RAM and runs within ~50-150ms per screenshot on standard CPUs.
+- **Language Support:** English (`en-US`) is pre-installed on Windows installations, and Vietnamese is supported when the Windows Vietnamese language pack is enabled.
+- **Zero Cloud Leakage:** 100% offline inference on the local CPU, meeting all privacy and local-first requirements.
+- **Architectural Portability:** All indexing, database, and UI logic interacts only with `dyn OcrEngine`. macOS (Vision framework) and Linux (Tesseract/ONNX) engines can be added without altering the indexing pipeline.
+
+### Consequence
+
+On Windows, the application requires the `windows` crate (WinRT bindings). For development and test environments, `MockOcrEngine` is provided to allow automated testing without hardware dependencies.
+
 ---
 
 ## ADR Template

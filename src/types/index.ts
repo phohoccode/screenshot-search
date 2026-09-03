@@ -14,6 +14,7 @@ export interface Folder {
   updatedAt: string;
   lastScannedAt: string | null;
   screenshotCount: number;
+  ocrSucceededCount: number;
 }
 
 /** Result of a discovery scan on a folder */
@@ -26,6 +27,33 @@ export interface ScanSummary {
   removed: number;
   failed: number;
   durationMs: number;
+}
+
+/** Summary of an OCR indexing batch */
+export interface OcrBatchSummary {
+  totalCandidates: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  durationMs: number;
+}
+
+/** Aggregated OCR status metrics */
+export interface OcrStats {
+  total: number;
+  pending: number;
+  processing: number;
+  succeeded: number;
+  failed: number;
+}
+
+/** Real-time progress payload emitted by backend */
+export interface OcrProgressPayload {
+  total: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  isRunning: boolean;
 }
 
 /** Error response from Tauri commands */
@@ -48,6 +76,10 @@ export type ErrorCode =
   | "FILE_METADATA_FAILED"
   | "FILE_HASH_FAILED"
   | "OCR_FAILED"
+  | "OCR_ENGINE_UNAVAILABLE"
+  | "OCR_IMAGE_DECODE_FAILED"
+  | "OCR_RECOGNITION_FAILED"
+  | "OCR_MODEL_LOAD_FAILED"
   | "INDEX_JOB_FAILED"
   | "SETTINGS_FAILED"
   | "UNKNOWN";

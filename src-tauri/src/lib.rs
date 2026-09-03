@@ -3,6 +3,7 @@ pub mod db;
 pub mod errors;
 pub mod filesystem;
 pub mod indexing;
+pub mod ocr;
 
 use tauri::Manager;
 
@@ -25,6 +26,9 @@ pub fn run() {
             commands::scan_folder,
             commands::pick_folder,
             commands::get_total_screenshot_count,
+            commands::start_ocr_indexing,
+            commands::get_ocr_stats,
+            commands::cancel_ocr_indexing,
         ])
         .setup(|app| {
             let app_data_dir = app
@@ -38,7 +42,13 @@ pub fn run() {
             let database =
                 db::connection::initialize(&app_data_dir).expect("Failed to initialize database");
 
+            // Perform startup recovery on stale PROCESSING jobs
+            if let Ok(conn) = database.conn.lock() {
+                let _ = db::screenshots::recover_stale_processing(&conn);
+            }
+
             app.manage(database);
+            app.manage(ocr::OcrManager::new());
 
             log::info!("Screenshot Search initialized successfully");
 

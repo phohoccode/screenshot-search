@@ -280,6 +280,8 @@ export function FoldersPage() {
                           </span>
                           <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
                             {folder.screenshotCount.toLocaleString()} images
+                            {folder.ocrSucceededCount > 0 &&
+                              ` (${folder.ocrSucceededCount.toLocaleString()} OCR indexed)`}
                           </span>
                         </div>
                         <p

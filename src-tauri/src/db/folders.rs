@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::AppError;
 
-/// Representation of a managed folder row in SQLite with screenshot count.
+/// Representation of a managed folder row in SQLite with screenshot count and OCR count.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderRecord {
@@ -15,6 +15,7 @@ pub struct FolderRecord {
     pub updated_at: String,
     pub last_scanned_at: Option<String>,
     pub screenshot_count: usize,
+    pub ocr_succeeded_count: usize,
 }
 
 /// Inserts a new folder into the database.
@@ -47,13 +48,14 @@ pub fn insert_folder(
     })
 }
 
-/// Lists all folders along with their current screenshot count.
+/// Lists all folders along with their current screenshot count and OCR indexed count.
 pub fn list_folders(conn: &Connection) -> Result<Vec<FolderRecord>, AppError> {
     let mut stmt = conn
         .prepare(
             "SELECT 
                 f.id, f.path, f.enabled, f.recursive, f.created_at, f.updated_at, f.last_scanned_at,
-                COUNT(s.id) as screenshot_count
+                COUNT(s.id) as screenshot_count,
+                SUM(CASE WHEN s.ocr_status = 'SUCCEEDED' THEN 1 ELSE 0 END) as ocr_succeeded_count
              FROM folders f
              LEFT JOIN screenshots s ON f.id = s.folder_id
              GROUP BY f.id
@@ -71,6 +73,7 @@ pub fn list_folders(conn: &Connection) -> Result<Vec<FolderRecord>, AppError> {
             let updated_at: String = row.get(5)?;
             let last_scanned_at: Option<String> = row.get(6)?;
             let screenshot_count: usize = row.get(7)?;
+            let ocr_succeeded_count: Option<i64> = row.get(8)?;
 
             Ok(FolderRecord {
                 id,
@@ -81,6 +84,7 @@ pub fn list_folders(conn: &Connection) -> Result<Vec<FolderRecord>, AppError> {
                 updated_at,
                 last_scanned_at,
                 screenshot_count,
+                ocr_succeeded_count: ocr_succeeded_count.unwrap_or(0) as usize,
             })
         })
         .map_err(|e| AppError::database(format!("Failed to execute list folders query: {e}")))?;
@@ -100,7 +104,8 @@ pub fn get_folder_by_id(conn: &Connection, id: i64) -> Result<Option<FolderRecor
         .prepare(
             "SELECT 
                 f.id, f.path, f.enabled, f.recursive, f.created_at, f.updated_at, f.last_scanned_at,
-                COUNT(s.id) as screenshot_count
+                COUNT(s.id) as screenshot_count,
+                SUM(CASE WHEN s.ocr_status = 'SUCCEEDED' THEN 1 ELSE 0 END) as ocr_succeeded_count
              FROM folders f
              LEFT JOIN screenshots s ON f.id = s.folder_id
              WHERE f.id = ?1
@@ -118,6 +123,7 @@ pub fn get_folder_by_id(conn: &Connection, id: i64) -> Result<Option<FolderRecor
             let updated_at: String = row.get(5)?;
             let last_scanned_at: Option<String> = row.get(6)?;
             let screenshot_count: usize = row.get(7)?;
+            let ocr_succeeded_count: Option<i64> = row.get(8)?;
 
             Ok(FolderRecord {
                 id,
@@ -128,6 +134,7 @@ pub fn get_folder_by_id(conn: &Connection, id: i64) -> Result<Option<FolderRecor
                 updated_at,
                 last_scanned_at,
                 screenshot_count,
+                ocr_succeeded_count: ocr_succeeded_count.unwrap_or(0) as usize,
             })
         })
         .map_err(|e| AppError::database(format!("Failed to execute get folder query: {e}")))?;
@@ -145,7 +152,8 @@ pub fn get_folder_by_path(conn: &Connection, path: &str) -> Result<Option<Folder
         .prepare(
             "SELECT 
                 f.id, f.path, f.enabled, f.recursive, f.created_at, f.updated_at, f.last_scanned_at,
-                COUNT(s.id) as screenshot_count
+                COUNT(s.id) as screenshot_count,
+                SUM(CASE WHEN s.ocr_status = 'SUCCEEDED' THEN 1 ELSE 0 END) as ocr_succeeded_count
              FROM folders f
              LEFT JOIN screenshots s ON f.id = s.folder_id
              WHERE LOWER(f.path) = LOWER(?1)
@@ -163,6 +171,7 @@ pub fn get_folder_by_path(conn: &Connection, path: &str) -> Result<Option<Folder
             let updated_at: String = row.get(5)?;
             let last_scanned_at: Option<String> = row.get(6)?;
             let screenshot_count: usize = row.get(7)?;
+            let ocr_succeeded_count: Option<i64> = row.get(8)?;
 
             Ok(FolderRecord {
                 id,
@@ -173,6 +182,7 @@ pub fn get_folder_by_path(conn: &Connection, path: &str) -> Result<Option<Folder
                 updated_at,
                 last_scanned_at,
                 screenshot_count,
+                ocr_succeeded_count: ocr_succeeded_count.unwrap_or(0) as usize,
             })
         })
         .map_err(|e| AppError::database(format!("Failed to execute get folder by path: {e}")))?;
