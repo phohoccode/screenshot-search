@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Folder,
@@ -7,6 +7,10 @@ import type {
   OcrBatchSummary,
   OcrProgressPayload,
   OcrEngineInfo,
+  SearchResultPage,
+  SearchResultItem,
+  ScreenshotDetail,
+  SearchIndexHealth,
   AppError,
 } from "@/types";
 
@@ -218,4 +222,157 @@ export async function onOcrProgress(
   }
   // Web preview: no-op unlisten
   return () => {};
+}
+
+/** Converts a native filesystem path to a safe Tauri asset protocol URL */
+export function getFileAssetUrl(filePath: string): string {
+  if (isTauri()) {
+    return convertFileSrc(filePath);
+  }
+  // Browser preview placeholder
+  const name = filePath.split(/[\\/]/).pop() || "Screenshot";
+  return `https://placehold.co/600x400/18181b/ffffff?text=${encodeURIComponent(name)}`;
+}
+
+// Mock search results for pure browser preview mode
+const mockSearchScreenshots: SearchResultItem[] = [
+  {
+    id: 101,
+    folderId: 1,
+    path: "C:\\Users\\User\\Pictures\\Screenshots\\terminal_error.png",
+    filename: "terminal_error.png",
+    modifiedAtFs: new Date(Date.now() - 7200000).toISOString(),
+    width: 1920,
+    height: 1080,
+    matchSnippet: "PrismaClientKnownRequestError: Transaction already closed [[match]]P2028[[/match]]",
+    score: 8.5,
+  },
+  {
+    id: 102,
+    folderId: 1,
+    path: "C:\\Users\\User\\Pictures\\Screenshots\\npm_build_failure.png",
+    filename: "npm_build_failure.png",
+    modifiedAtFs: new Date(Date.now() - 14400000).toISOString(),
+    width: 1920,
+    height: 1080,
+    matchSnippet: "npm ERR! code [[match]]ERR_MODULE_NOT_FOUND[[/match]] Cannot find module on [[match]]localhost:3000[[/match]]",
+    score: 6.2,
+  },
+  {
+    id: 103,
+    folderId: 1,
+    path: "C:\\Users\\User\\Pictures\\Screenshots\\invoice_september.png",
+    filename: "invoice_september.png",
+    modifiedAtFs: new Date(Date.now() - 86400000).toISOString(),
+    width: 1200,
+    height: 900,
+    matchSnippet: "Invoice #2026-09 total $150.00 USD paid via Stripe [[match]]HTTP 500[[/match]] internal server error",
+    score: 4.8,
+  },
+];
+
+/** Searches screenshots using SQLite FTS5 with BM25 ranking */
+export async function searchScreenshots(
+  query: string,
+  folderId?: number,
+  limit?: number,
+  offset?: number
+): Promise<SearchResultPage> {
+  if (isTauri()) {
+    return await invoke<SearchResultPage>("search_screenshots", {
+      query,
+      folderId: folderId ?? null,
+      limit: limit ?? null,
+      offset: offset ?? null,
+    });
+  }
+
+  // Web browser fallback simulation
+  await new Promise((r) => setTimeout(r, 120));
+  const q = query.toLowerCase().trim();
+  if (!q) {
+    return {
+      items: mockSearchScreenshots,
+      totalMatches: mockSearchScreenshots.length,
+      hasMore: false,
+    };
+  }
+
+  const filtered = mockSearchScreenshots.filter(
+    (item) =>
+      item.filename.toLowerCase().includes(q) ||
+      (item.matchSnippet && item.matchSnippet.toLowerCase().includes(q))
+  );
+
+  return {
+    items: filtered,
+    totalMatches: filtered.length,
+    hasMore: false,
+  };
+}
+
+/** Retrieves complete detail of a single screenshot */
+export async function getScreenshot(id: number): Promise<ScreenshotDetail> {
+  if (isTauri()) {
+    return await invoke<ScreenshotDetail>("get_screenshot", { id });
+  }
+
+  const mock = mockSearchScreenshots.find((s) => s.id === id) ?? mockSearchScreenshots[0];
+  if (!mock) {
+    throw new Error(`Screenshot ${id} not found`);
+  }
+
+  return {
+    id: mock.id,
+    folderId: mock.folderId,
+    path: mock.path,
+    filename: mock.filename,
+    extension: "png",
+    fileSize: 1024 * 512,
+    modifiedAtFs: mock.modifiedAtFs,
+    width: mock.width,
+    height: mock.height,
+    ocrText: mock.matchSnippet?.replace(/\[\[\/?match\]\]/g, "") || "Sample OCR text",
+    ocrStatus: "SUCCEEDED",
+    ocrEngine: "windows_media_ocr",
+    indexedAt: new Date().toISOString(),
+  };
+}
+
+/** Opens the screenshot using the default OS application */
+export async function openScreenshot(id: number): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("open_screenshot", { id });
+  }
+  alert(`Browser preview: opened screenshot #${id}`);
+  return true;
+}
+
+/** Highlights the screenshot in Windows File Explorer */
+export async function revealScreenshot(id: number): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("reveal_screenshot", { id });
+  }
+  alert(`Browser preview: revealed screenshot #${id} in file explorer`);
+  return true;
+}
+
+/** Rebuilds the search index */
+export async function rebuildSearchIndex(): Promise<number> {
+  if (isTauri()) {
+    return await invoke<number>("rebuild_search_index");
+  }
+  return mockSearchScreenshots.length;
+}
+
+/** Checks search index health */
+export async function checkSearchIndexHealth(): Promise<SearchIndexHealth> {
+  if (isTauri()) {
+    return await invoke<SearchIndexHealth>("check_search_index_health");
+  }
+  return {
+    ftsCount: mockSearchScreenshots.length,
+    succeededCount: mockSearchScreenshots.length,
+    isHealthy: true,
+  };
 }

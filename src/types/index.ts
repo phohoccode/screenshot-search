@@ -66,6 +66,49 @@ export interface OcrEngineInfo {
   maxImageDimension: number;
 }
 
+export interface SearchResultItem {
+  id: number;
+  folderId: number;
+  path: string;
+  filename: string;
+  modifiedAtFs: string;
+  width?: number | null;
+  height?: number | null;
+  matchSnippet?: string | null;
+  score: number;
+}
+
+/** Paginated search response */
+export interface SearchResultPage {
+  items: SearchResultItem[];
+  totalMatches: number;
+  hasMore: boolean;
+}
+
+/** Complete detail of a single screenshot */
+export interface ScreenshotDetail {
+  id: number;
+  folderId: number;
+  path: string;
+  filename: string;
+  extension: string;
+  fileSize: number;
+  modifiedAtFs: string;
+  width?: number | null;
+  height?: number | null;
+  ocrText?: string | null;
+  ocrStatus: string;
+  ocrEngine?: string | null;
+  indexedAt?: string | null;
+}
+
+/** Search index health diagnostic metrics */
+export interface SearchIndexHealth {
+  ftsCount: number;
+  succeededCount: number;
+  isHealthy: boolean;
+}
+
 /** Error response from Tauri commands */
 export interface AppError {
   code: ErrorCode;

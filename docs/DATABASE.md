@@ -148,36 +148,35 @@ CAPTION
 
 ---
 
-## 4. FTS5
+## 4. FTS5 Virtual Table & Search Index
 
-Suggested logical FTS fields:
+Implemented in **Migration v2** as a standalone SQLite FTS5 table with explicit synchronization:
 
-```text
-screenshot_id
-filename
-ocr_text
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS screenshots_fts USING fts5(
+    filename,
+    ocr_search_text,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
 ```
 
-The implementation may use:
+### Design Rationale:
+- **`rowid` mapping:** Each FTS entry's implicit 64-bit `rowid` directly equals `screenshots.id`. This provides $O(1)$ joins (`JOIN screenshots s ON s.id = screenshots_fts.rowid`) without unindexed column overhead.
+- **Standalone with Explicit Sync vs External Content:** Avoids brittle SQLite shadow table triggers. The source of truth remains `screenshots`; `screenshots_fts` is purely derived.
+- **Tokenizer (`unicode61 remove_diacritics 2`):** Enables accent-insensitive matching across Latin scripts while treating punctuation as natural word boundaries.
 
-- external-content FTS table
-- contentless FTS table
-- normal FTS table with explicit synchronization
-
-Choose one design intentionally and document it.
-
-### Search behavior
-
-FTS should support:
-
-- exact words
-- technical error codes
-- phrases
-- prefixes where useful
-- filename search
-- OCR text search
-
-Use BM25 or equivalent FTS ranking as the Phase 1 ranking baseline.
+### Synchronization Invariants:
+1. **OCR Success:** When `save_ocr_success(id, ocr_text)` commits, `normalize_search_text(ocr_text)` is computed and synced via:
+   `INSERT OR REPLACE INTO screenshots_fts (rowid, filename, ocr_search_text) SELECT id, filename, ?2 FROM screenshots WHERE id = ?1;`
+2. **File Modified:** When `update_screenshot(id, ...)` resets `ocr_status = 'PENDING'`, stale FTS entries are immediately purged via:
+   `DELETE FROM screenshots_fts WHERE rowid = ?1;`
+3. **File Deleted:** When `delete_screenshot(id)` is called, the FTS record is immediately purged:
+   `DELETE FROM screenshots_fts WHERE rowid = ?1;`
+4. **Folder Deleted:** When `delete_folder(folder_id)` is invoked, associated FTS rows are cleaned up atomically:
+   `DELETE FROM screenshots_fts WHERE rowid IN (SELECT id FROM screenshots WHERE folder_id = ?1);`
+5. **Rebuild & Health Diagnostic:**
+   - `rebuild_search_index(conn)`: Clears and fully re-populates `screenshots_fts` from all `SUCCEEDED` screenshots.
+   - `check_search_index_health(conn)`: Asserts `fts_count == succeeded_count`.
 
 ---
 

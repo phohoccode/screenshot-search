@@ -87,6 +87,14 @@ impl AppError {
     pub fn ocr_unavailable(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::OcrEngineUnavailable, message)
     }
+
+    pub fn file_not_found(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::FileNotFound, message)
+    }
+
+    pub fn unknown(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Unknown, message)
+    }
 }
 
 impl From<rusqlite::Error> for AppError {

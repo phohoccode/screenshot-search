@@ -129,12 +129,17 @@ pub fn update_screenshot(
     )
     .map_err(|e| AppError::database(format!("Failed to update screenshot: {e}")))?;
 
+    // Immediately purge stale FTS record so modified file ceases matching previous content
+    let _ = conn.execute("DELETE FROM screenshots_fts WHERE rowid = ?1", params![id]);
+
     Ok(())
 }
 
 /// Deletes a screenshot by its ID (used when the original file is deleted on disk).
 /// Only removes database index metadata — NEVER touches the filesystem.
 pub fn delete_screenshot(conn: &Connection, id: i64) -> Result<(), AppError> {
+    let _ = conn.execute("DELETE FROM screenshots_fts WHERE rowid = ?1", params![id]);
+
     conn.execute("DELETE FROM screenshots WHERE id = ?1", params![id])
         .map_err(|e| AppError::database(format!("Failed to delete screenshot: {e}")))?;
 
@@ -240,7 +245,36 @@ pub fn mark_processing(conn: &Connection, id: i64) -> Result<bool, AppError> {
     Ok(affected == 1)
 }
 
+/// Detailed representation of a screenshot for modal preview and inspection.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotDetail {
+    pub id: i64,
+    pub folder_id: i64,
+    pub path: String,
+    pub filename: String,
+    pub extension: String,
+    pub file_size: u64,
+    pub modified_at_fs: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub ocr_text: Option<String>,
+    pub ocr_status: String,
+    pub ocr_engine: Option<String>,
+    pub indexed_at: Option<String>,
+}
+
+/// Search index health diagnostics comparing FTS entries to searchable screenshots.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchIndexHealth {
+    pub fts_count: usize,
+    pub succeeded_count: usize,
+    pub is_healthy: bool,
+}
+
 /// Persists successful OCR text and updates status to `SUCCEEDED`.
+/// Synchronizes the normalized search representation to SQLite FTS5 index.
 pub fn save_ocr_success(
     conn: &Connection,
     id: i64,
@@ -259,6 +293,15 @@ pub fn save_ocr_success(
     )
     .map_err(|e| AppError::database(format!("Failed to save OCR success: {e}")))?;
 
+    // Synchronize to FTS5 index
+    let search_text = crate::search::normalize::normalize_search_text(ocr_text);
+    conn.execute(
+        "INSERT OR REPLACE INTO screenshots_fts (rowid, filename, ocr_search_text)
+         SELECT id, filename, ?2 FROM screenshots WHERE id = ?1",
+        params![id, search_text],
+    )
+    .map_err(|e| AppError::database(format!("Failed to sync FTS on OCR success: {e}")))?;
+
     Ok(())
 }
 
@@ -274,7 +317,123 @@ pub fn mark_ocr_failed(conn: &Connection, id: i64, ocr_engine: &str) -> Result<(
     )
     .map_err(|e| AppError::database(format!("Failed to mark OCR failed: {e}")))?;
 
+    // Purge any stale FTS entry if previously succeeded
+    let _ = conn.execute("DELETE FROM screenshots_fts WHERE rowid = ?1", params![id]);
+
     Ok(())
+}
+
+/// Retrieves complete metadata and OCR text for a single screenshot by ID.
+pub fn get_screenshot_by_id(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<ScreenshotDetail>, AppError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT 
+                id, folder_id, path, filename, extension, file_size, modified_at_fs,
+                width, height, ocr_text, ocr_status, ocr_engine, indexed_at
+             FROM screenshots 
+             WHERE id = ?1",
+        )
+        .map_err(|e| AppError::database(format!("Failed to prepare get_screenshot_by_id: {e}")))?;
+
+    let mut rows = stmt
+        .query_map(params![id], |row| {
+            let file_size: i64 = row.get(5)?;
+            let width: Option<i64> = row.get(7)?;
+            let height: Option<i64> = row.get(8)?;
+
+            Ok(ScreenshotDetail {
+                id: row.get(0)?,
+                folder_id: row.get(1)?,
+                path: row.get(2)?,
+                filename: row.get(3)?,
+                extension: row.get(4)?,
+                file_size: file_size as u64,
+                modified_at_fs: row.get(6)?,
+                width: width.map(|w| w as u32),
+                height: height.map(|h| h as u32),
+                ocr_text: row.get(9)?,
+                ocr_status: row.get(10)?,
+                ocr_engine: row.get(11)?,
+                indexed_at: row.get(12)?,
+            })
+        })
+        .map_err(|e| AppError::database(format!("Failed to query screenshot detail: {e}")))?;
+
+    match rows.next() {
+        Some(Ok(detail)) => Ok(Some(detail)),
+        Some(Err(e)) => Err(AppError::database(format!(
+            "Failed to read screenshot detail: {e}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Rebuilds the entire FTS5 search index from scratch using source data in `screenshots`.
+/// Idempotent maintenance operation ensuring complete index recoverability.
+pub fn rebuild_search_index(conn: &Connection) -> Result<usize, AppError> {
+    conn.execute("DELETE FROM screenshots_fts", [])
+        .map_err(|e| AppError::database(format!("Failed to clear FTS index: {e}")))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, filename, ocr_text 
+             FROM screenshots 
+             WHERE ocr_status = 'SUCCEEDED' AND ocr_text IS NOT NULL",
+        )
+        .map_err(|e| AppError::database(format!("Failed to prepare rebuild query: {e}")))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let filename: String = row.get(1)?;
+            let ocr_text: String = row.get(2)?;
+            Ok((id, filename, ocr_text))
+        })
+        .map_err(|e| AppError::database(format!("Failed to query succeeded screenshots: {e}")))?;
+
+    let mut count = 0;
+    for row in rows {
+        let (id, filename, ocr_text) =
+            row.map_err(|e| AppError::database(format!("Failed to read screenshot row: {e}")))?;
+        let search_text = crate::search::normalize::normalize_search_text(&ocr_text);
+        conn.execute(
+            "INSERT OR REPLACE INTO screenshots_fts (rowid, filename, ocr_search_text) 
+             VALUES (?1, ?2, ?3)",
+            params![id, filename, search_text],
+        )
+        .map_err(|e| {
+            AppError::database(format!("Failed to index screenshot {id} into FTS: {e}"))
+        })?;
+        count += 1;
+    }
+
+    log::info!("Rebuilt search index: indexed {count} screenshot(s)");
+    Ok(count)
+}
+
+/// Diagnoses search index health by comparing FTS index size with SUCCEEDED screenshot records.
+pub fn check_search_index_health(conn: &Connection) -> Result<SearchIndexHealth, AppError> {
+    let fts_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM screenshots_fts", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    let succeeded_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM screenshots WHERE ocr_status = 'SUCCEEDED' AND ocr_text IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    let is_healthy = fts_count == succeeded_count;
+    Ok(SearchIndexHealth {
+        fts_count: fts_count as usize,
+        succeeded_count: succeeded_count as usize,
+        is_healthy,
+    })
 }
 
 /// Aggregates total, pending, processing, succeeded, and failed screenshot counts.

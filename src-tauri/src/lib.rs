@@ -4,6 +4,7 @@ pub mod errors;
 pub mod filesystem;
 pub mod indexing;
 pub mod ocr;
+pub mod search;
 
 use tauri::Manager;
 
@@ -30,6 +31,12 @@ pub fn run() {
             commands::get_ocr_stats,
             commands::get_ocr_engine_info,
             commands::cancel_ocr_indexing,
+            commands::search_screenshots,
+            commands::get_screenshot,
+            commands::open_screenshot,
+            commands::reveal_screenshot,
+            commands::rebuild_search_index,
+            commands::check_search_index_health,
         ])
         .setup(|app| {
             let app_data_dir = app

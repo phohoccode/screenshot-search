@@ -24,65 +24,44 @@ Natural-language semantic retrieval is a later phase.
 
 ---
 
-## 2. Phase 1 — Keyword Search
+## 2. Phase 1 — Keyword Search (Implemented in Phase 1D)
 
 Technology:
-
-- SQLite FTS5
-- BM25 ranking
+- SQLite FTS5 (`screenshots_fts`)
+- BM25 ranking (`bm25(screenshots_fts, 5.0, 1.0)`)
+- Custom OCR-tolerant normalization pipeline
 
 Searchable text:
-
-- filename
-- OCR text
-
-Optional future searchable fields:
-
-- folder name
-- manually assigned tags
-- AI-generated tags
-- AI-generated caption
+- `filename`: weighted 5.0x for exact/prefix filename relevance.
+- `ocr_search_text`: normalized OCR content weighted 1.0x.
 
 ---
 
-## 3. Query Handling
+## 3. Query & Text Normalization Pipeline
 
-Do not over-transform technical queries.
+To reconcile real-world OCR variance (where punctuation like `_` in `ERR_MODULE_NOT_FOUND` may be dropped as whitespace `ERR MODULE NOT FOUND`), the system generates two representations:
+- **Raw OCR text (`screenshots.ocr_text`):** Stored intact for human inspection, snippet preview, and text copying.
+- **Search representation (`screenshots_fts.ocr_search_text`):**
+  - Unicode NFC normalization
+  - Lowercasing
+  - Normalizes underscores `_`, hyphens `-`, colons `:`, slashes `/`, and noise punctuation to single spaces
+  - Preserves technical identifiers (`P2028`, `HTTP 500`) and dotted formats (`v1.2.3`, `192.168.1.1`)
+  - Collapses multiple whitespace into single space
 
-For example:
-
-```text
-P2028
-ERR_CONNECTION_REFUSED
-npm ERESOLVE
-```
-
-must remain searchable as technical tokens where FTS tokenization permits.
-
-Query normalization may include:
-
-- trim
-- collapse whitespace
-- safe handling of quotes/operators
-- Unicode normalization
-
-Avoid aggressive stemming or synonym rewriting until measured.
+The same rules are applied symmetrically to user queries via `normalize_search_query()`, ensuring that `ERR_MODULE_NOT_FOUND`, `ERR-MODULE-NOT-FOUND`, and `err module not found` all match identical index tokens.
 
 ---
 
-## 4. Ranking
+## 4. Ranking & Snippets
 
-Phase 1 baseline:
-
-```text
-FTS BM25
+Implemented ranking:
+```sql
+ORDER BY bm25(screenshots_fts, 5.0, 1.0) ASC, s.modified_at_fs DESC
 ```
 
-Potential metadata boosts:
-
-- filename exact match
-- exact technical identifier match
-- recency
+- Filename matches receive a 5.0x relevance boost over body text.
+- Recency tiebreaker: among identical relevance scores, newer screenshots rank first.
+- Safe Snippets: FTS5 `snippet()` wraps matched tokens with `[[match]]...[[/match]]`. The frontend parses these markers into React text nodes, preventing any HTML injection vulnerability.
 
 Future conceptual hybrid score:
 

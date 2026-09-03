@@ -13,44 +13,12 @@ mod tests {
 
     fn setup_test_db() -> Database {
         let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
-        conn.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE folders (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 path TEXT NOT NULL UNIQUE,
-                 enabled INTEGER NOT NULL DEFAULT 1,
-                 recursive INTEGER NOT NULL DEFAULT 1,
-                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-                 last_scanned_at TEXT
-             );
-             CREATE TABLE screenshots (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-                 path TEXT NOT NULL,
-                 filename TEXT NOT NULL,
-                 extension TEXT NOT NULL,
-                 file_size INTEGER NOT NULL,
-                 modified_at_fs TEXT NOT NULL,
-                 content_hash TEXT,
-                 width INTEGER,
-                 height INTEGER,
-                 ocr_text TEXT,
-                 ocr_status TEXT NOT NULL DEFAULT 'PENDING',
-                 ocr_engine TEXT,
-                 indexed_at TEXT,
-                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-             );
-             CREATE UNIQUE INDEX idx_screenshots_path ON screenshots(path);
-             CREATE INDEX idx_screenshots_ocr_status ON screenshots(ocr_status);
-             
-             INSERT INTO folders (path) VALUES ('C:\\Screenshots');",
-        )
-        .expect("Failed to setup test database schema");
+        crate::db::migrations::run_migrations(&conn).expect("Failed to run migrations");
+        conn.execute("INSERT INTO folders (path) VALUES ('C:\\Screenshots')", [])
+            .expect("Failed to insert initial test folder");
 
         Database {
-            conn: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            conn: Arc::new(std::sync::Mutex::new(conn)),
         }
     }
 
@@ -476,25 +444,29 @@ mod tests {
 
     #[test]
     fn test_oversized_strategy_math() {
-        use crate::ocr::windows::{
-            determine_processing_strategy, OcrProcessingStrategy, SAFE_MAX_OCR_DIMENSION,
-        };
+        use crate::ocr::windows::{determine_processing_strategy, OcrProcessingStrategy};
 
         // 1. Normal image: 1920x1080
         let s_1080p = determine_processing_strategy(1920, 1080, 10000);
         assert_eq!(s_1080p, OcrProcessingStrategy::Direct);
 
-        // 2. 4K 3840x2160 (aspect ratio 1.78 <= 2.2, moderately oversized)
-        let s_4k = determine_processing_strategy(3840, 2160, 10000);
-        match s_4k {
+        // 2. 4K 3840x2160: Direct if within runtime 10000, Downscaled if constrained to 2600
+        let s_4k_native = determine_processing_strategy(3840, 2160, 10000);
+        assert_eq!(s_4k_native, OcrProcessingStrategy::Direct);
+
+        let s_4k_constrained = determine_processing_strategy(3840, 2160, 2600);
+        match s_4k_constrained {
             OcrProcessingStrategy::ProportionalDownscale {
                 target_width,
                 target_height,
             } => {
-                assert_eq!(target_width, SAFE_MAX_OCR_DIMENSION);
+                assert_eq!(target_width, 2600);
                 assert_eq!(target_height, 1463);
             }
-            other => panic!("Expected ProportionalDownscale for 4K, got {:?}", other),
+            other => panic!(
+                "Expected ProportionalDownscale for constrained 4K, got {:?}",
+                other
+            ),
         }
 
         // 3. Super Ultra-wide 5120x1440 (aspect ratio 3.56 > 2.0)

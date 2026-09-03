@@ -161,14 +161,8 @@ pub fn determine_processing_strategy(
     height: u32,
     max_dimension: u32,
 ) -> OcrProcessingStrategy {
-    let safe_limit = max_dimension.min(SAFE_MAX_OCR_DIMENSION);
-
-    if width <= safe_limit && height <= safe_limit {
-        return OcrProcessingStrategy::Direct;
-    }
-
-    // Extremely tall screenshot: height > 2x width and height > safe_limit
-    if height > width * 2 && height > safe_limit {
+    // 1. Extremely tall screenshot: height > 2x width and height > TILE_SIZE
+    if height > width * 2 && height > TILE_SIZE {
         let step = TILE_SIZE.saturating_sub(TILE_OVERLAP).max(1);
         let mut tiles = Vec::new();
         let mut y = 0;
@@ -188,8 +182,8 @@ pub fn determine_processing_strategy(
         return OcrProcessingStrategy::VerticalTiling { tiles };
     }
 
-    // Extremely wide screenshot: width > 2x height and width > safe_limit
-    if width > height * 2 && width > safe_limit {
+    // 2. Extremely wide screenshot: width > 2x height and width > TILE_SIZE
+    if width > height * 2 && width > TILE_SIZE {
         let step = TILE_SIZE.saturating_sub(TILE_OVERLAP).max(1);
         let mut tiles = Vec::new();
         let mut x = 0;
@@ -209,9 +203,15 @@ pub fn determine_processing_strategy(
         return OcrProcessingStrategy::HorizontalTiling { tiles };
     }
 
-    // Moderately oversized (e.g. 4K 3840x2160, 16:9 standard ratio):
-    // Proportional downscale
-    let (target_width, target_height) = calculate_downscaled_dimensions(width, height, safe_limit);
+    // 3. Normal / Moderate aspect ratio:
+    // If within runtime max dimension, process directly at native resolution.
+    if width <= max_dimension && height <= max_dimension {
+        return OcrProcessingStrategy::Direct;
+    }
+
+    // 4. Moderately oversized: proportionally downscale to fit within max_dimension.
+    let (target_width, target_height) =
+        calculate_downscaled_dimensions(width, height, max_dimension);
     OcrProcessingStrategy::ProportionalDownscale {
         target_width,
         target_height,

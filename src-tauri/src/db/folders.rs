@@ -197,6 +197,12 @@ pub fn get_folder_by_path(conn: &Connection, path: &str) -> Result<Option<Folder
 /// Deletes a folder by ID. Due to CASCADE FOREIGN KEY, child screenshots are automatically removed.
 /// Does NOT touch any files on the filesystem.
 pub fn delete_folder(conn: &Connection, id: i64) -> Result<bool, AppError> {
+    // Purge corresponding FTS records for screenshots belonging to this folder
+    let _ = conn.execute(
+        "DELETE FROM screenshots_fts WHERE rowid IN (SELECT id FROM screenshots WHERE folder_id = ?1)",
+        params![id],
+    );
+
     let rows_affected = conn
         .execute("DELETE FROM folders WHERE id = ?1", params![id])
         .map_err(|e| AppError::database(format!("Failed to delete folder: {e}")))?;

@@ -9,10 +9,17 @@
 
 ## Current Phase
 
-**Phase 1C — Local OCR Pipeline**  
-**Status:** COMPLETED
+**Phase 1D — SQLite FTS5 Keyword Search + OCR-Tolerant Search**  
+**Status:** COMPLETED — **CORE MVP COMPLETED**
 
-Source code, OCR abstraction (`OcrEngine`), native Windows Media OCR WinRT implementation, adaptive 3-tier image strategy (downscale + bounded in-memory tiling), text normalization, SQLite persistence, background worker orchestration, startup crash recovery, 32 comprehensive tests (including real image fixtures), and the Indexing UI are fully implemented, verified, and validated on the Windows host.
+The core product lifecycle is now complete:
+1. Select folder
+2. Scan & discover screenshots
+3. Extract text locally with Windows.Media.Ocr
+4. Search keywords, phrases, codes (`P2028`, `HTTP 500`), and identifiers (`ERR_MODULE_NOT_FOUND`) with OCR-tolerant matching
+5. View responsive results grid with highlighted snippets
+6. Inspect screenshot in full preview dialog and copy OCR text
+7. Open original in default viewer and reveal in Windows File Explorer
 
 ---
 
@@ -20,11 +27,11 @@ Source code, OCR abstraction (`OcrEngine`), native Windows Media OCR WinRT imple
 
 - `cargo fmt --check` → **PASS** (0 formatting diffs across `src-tauri/`)
 - `cargo check --manifest-path ./src-tauri/Cargo.toml` → **PASS** (Clean compilation, 0 errors, 0 warnings)
-- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (32 passed; 0 failed; finished in 0.27s)
+- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**45 passed**; 0 failed; finished in 0.63s)
 - `npm run typecheck` → **PASS** (0 TypeScript errors in `src/`)
-- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.00s)
-- `npm run tauri dev` → **PASS** (Tauri 2 dev server and native window launched cleanly)
-- **Real Windows WinRT OCR** → **PASS** (Empirically verified against English, Vietnamese fallback, mixed technical, code/terminal, 4K, tall, and wide fixtures)
+- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.11s)
+- `npm run tauri dev` → **PASS** (Migration v2 auto-applied, 11 existing records backfilled, window launched)
+- **FTS5 Benchmark** → **PASS** (1k records: 1.06 ms; 10k records: 7.27 ms single token, 12.13 ms phrase)
 
 ---
 
@@ -97,7 +104,43 @@ Source code, OCR abstraction (`OcrEngine`), native Windows Media OCR WinRT imple
 
 ## In Progress
 
-None (Phase 1C completed and verified; Phase 1D not started).
+### Phase 1D — SQLite FTS5 Keyword Search + OCR-Tolerant Search (Core MVP)
+- **FTS5 Virtual Table Migration:** Migration v2 adds `screenshots_fts` with `tokenize = 'unicode61 remove_diacritics 2'`, using `rowid` mapped to `screenshots.id`. Automatic idempotent backfill indexes existing `SUCCEEDED` screenshots without requiring re-OCR.
+- **OCR-Tolerant Normalization:**
+  - `normalize_search_text` & `normalize_search_query` symmetrically convert underscores `_`, hyphens `-`, and punctuation to whitespace while preserving technical tokens (`P2028`, `HTTP 500`) and dotted formats (`v1.2.3`, `192.168.1.1`).
+  - Resolves OCR punctuation-loss variance (`ERR_MODULE_NOT_FOUND` matches `ERR MODULE NOT FOUND`).
+  - Raw OCR text (`screenshots.ocr_text`) is preserved intact for human viewing.
+- **BM25 Ranking with Filename Boost:**
+  - Weighted BM25: `bm25(screenshots_fts, 5.0, 1.0)` boosts filename relevance 5.0x over OCR text.
+  - Recency tiebreaker: `ORDER BY score ASC, s.modified_at_fs DESC`.
+- **Match Snippets & Zero HTML Injection:**
+  - FTS `snippet()` wraps matched tokens with `[[match]]...[[/match]]`.
+  - Frontend parses tokens into React text nodes (`<mark>`), avoiding `dangerouslySetInnerHTML`.
+- **Empty Query Behavior:**
+  - Searching empty/whitespace returns recent OCR-ready screenshots sorted by timestamp.
+- **Strict Security Boundaries:**
+  - `open_screenshot(id)` & `reveal_screenshot(id)` strictly take `id: i64`, validating against SQLite and filesystem before launching native Windows OS processes.
+  - Arbitrary paths from the frontend are disallowed.
+- **Index Synchronization & Rebuild:**
+  - Changes to screenshots (edits/deletions) immediately purge stale FTS records.
+  - Cascade folder deletions atomically purge child FTS rows.
+  - `rebuild_search_index()` allows complete idempotent recovery.
+  - `check_search_index_health()` diagnoses sync health.
+- **Search UI & Preview Modal:**
+  - Debounced search input (200ms) with clear button and `/` shortcut key.
+  - Responsive desktop grid with lazy-loaded thumbnails (`convertFileSrc`).
+  - Full screenshot preview dialog with metadata, scrollable OCR text, "Copy OCR Text" button, "Open original", and "Reveal in Explorer".
+  - "Load more" pagination.
+- **Empirical Search Benchmarks:**
+  - 1,000 records: Single token **1.06 ms**, Phrase **1.11 ms**, Underscore **1.20 ms**, Filename **0.67 ms**.
+  - 10,000 records: Single token **7.27 ms**, Phrase **12.13 ms**, Underscore **13.97 ms**, Filename **3.37 ms**.
+- **Unit & Integration Tests:** 45 comprehensive tests passing in `src-tauri` (13 new search tests).
+
+---
+
+## In Progress
+
+None (Phase 1D completed and verified; Core MVP complete).
 
 ---
 
@@ -109,14 +152,12 @@ None.
 
 ## Next Recommended Work
 
-### Phase 1D — SQLite FTS5 Keyword Search (NOT STARTED)
+### Phase 2 — Automatic Filesystem Watcher + Background Indexing Reliability
 
-1. Create SQLite FTS5 virtual table for screenshots (`fts_screenshots`).
-2. Implement triggers or synchronization layer from `screenshots(id, filename, ocr_text)` to FTS5.
-3. Implement `MATCH` query with BM25 ranking and query term normalization.
-4. Build interactive Search UI with search input, debounce, and thumbnail grid.
-5. Add screenshot preview modal with highlighted text snippets.
-6. Add "Open Original" and "Reveal in Explorer" actions.
+1. Background directory watcher (`notify` crate) monitoring registered folders.
+2. Automatic change detection for newly added, modified, or deleted screenshots.
+3. Persistent background indexing queue with pause / resume capabilities.
+4. Thumbnail caching infrastructure for ultra-fast instant grid rendering.
 
 ---
 
@@ -124,31 +165,38 @@ None.
 
 ```text
 Last completed task:
-- Phase 1C — Local OCR Pipeline final acceptance & runtime validation complete (32 tests PASS, real WinRT OCR PASS, tauri dev PASS).
+- Phase 1D — SQLite FTS5 Keyword Search + OCR-Tolerant Search complete (CORE MVP COMPLETED).
+  All 45 tests PASS, 10k benchmark ~7-13ms, migration v2 backfilled, tauri dev verified.
 
 Files changed:
-- src-tauri/Cargo.toml (Added windows features: Win32_System_Com, Foundation_Collections, Globalization)
-- src-tauri/src/db/connection.rs (Arc<Mutex<Connection>> for thread-safe worker access)
-- src-tauri/src/db/screenshots.rs (Unified query_map closure type)
-- src-tauri/src/ocr/normalize.rs (Owned String allocation in normalize_ocr_text)
-- src-tauri/src/ocr/windows.rs (Adaptive 3-tier tiling strategy, BitmapTransform::SetBounds, conservative deduplication)
-- src-tauri/src/commands/ocr.rs (COM MTA CoInitializeEx/CoUninitialize on worker thread)
-- src-tauri/src/filesystem/scanner_tests.rs (Added missing ocr_succeeded_count field)
-- src-tauri/src/ocr/ocr_tests.rs (Added real fixtures, tiling math, benchmarks, diagnostics)
-- src-tauri/tests/fixtures/ (Generated real PNG test fixtures)
-- CURRENT_STATUS.md (Updated to Phase 1C — COMPLETED)
+- src-tauri/Cargo.toml (Added tauri feature: protocol-asset)
+- src-tauri/tauri.conf.json (Configured assetProtocol enable and scope)
+- src-tauri/src/errors.rs (Added file_not_found and unknown helpers)
+- src-tauri/src/ocr/windows.rs (Removed hardcoded 2600 limit; uses runtime MaxImageDimension)
+- src-tauri/src/db/migrations.rs (Added Migration 2 screenshots_fts and backfill logic)
+- src-tauri/src/db/screenshots.rs (FTS sync on save/update/delete, get_screenshot_by_id, rebuild, health check)
+- src-tauri/src/db/folders.rs (Purge FTS entries on folder deletion)
+- src-tauri/src/search/ (mod.rs, normalize.rs, query.rs, search_tests.rs)
+- src-tauri/src/commands/ (mod.rs, search.rs)
+- src-tauri/src/lib.rs (Registered search module and commands)
+- src/types/index.ts (Added SearchResultItem, SearchResultPage, ScreenshotDetail, SearchIndexHealth)
+- src/lib/tauri.ts (Added searchScreenshots, getScreenshot, openScreenshot, revealScreenshot, getFileAssetUrl)
+- src/features/search/search-page.tsx (Full search UI, highlight snippet, preview modal, load more)
+- docs/DATABASE.md (Documented FTS5 virtual table schema, rowid, and sync)
+- docs/SEARCH_CONTEXT.md (Documented implemented search pipeline and BM25 weighting)
+- CURRENT_STATUS.md (Updated to Phase 1D — COMPLETED, CORE MVP COMPLETED)
 
 Tests run:
 - cargo fmt --check (PASS)
-- cargo check (PASS - 1.14s)
-- cargo test (PASS - 32 passed, 0 failed, 0.27s)
+- cargo check (PASS - 2.41s)
+- cargo test (PASS - 45 passed, 0 failed, 0.63s)
 - npm run typecheck (PASS)
-- npm run build (PASS - 3.00s)
-- npm run tauri dev (PASS - launched successfully)
+- npm run build (PASS - 3.11s)
+- npm run tauri dev (PASS - launched successfully, migration v2 applied, 11 backfilled)
 
 Current blocker:
 - None
 
 Exact next task:
-- Phase 1D — SQLite FTS5 Keyword Search (when instructed by user)
+- Phase 2 — Automatic Filesystem Watcher + Background Indexing Reliability (when instructed by user)
 ```

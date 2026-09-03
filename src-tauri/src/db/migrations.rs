@@ -8,9 +8,10 @@ struct Migration {
 }
 
 /// All migrations in order. Append-only after release.
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: "
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: "
             CREATE TABLE IF NOT EXISTS folders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT NOT NULL UNIQUE,
@@ -44,7 +45,60 @@ const MIGRATIONS: &[Migration] = &[Migration {
             CREATE INDEX IF NOT EXISTS idx_screenshots_folder_id ON screenshots(folder_id);
             CREATE INDEX IF NOT EXISTS idx_screenshots_ocr_status ON screenshots(ocr_status);
         ",
-}];
+    },
+    Migration {
+        version: 2,
+        sql: "
+            CREATE VIRTUAL TABLE IF NOT EXISTS screenshots_fts USING fts5(
+                filename,
+                ocr_search_text,
+                tokenize = 'unicode61 remove_diacritics 2'
+            );
+        ",
+    },
+];
+
+/// Backfills existing SUCCEEDED screenshots into the FTS5 index upon migration to v2.
+fn backfill_fts_index(conn: &Connection) -> Result<(), AppError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, filename, ocr_text 
+             FROM screenshots 
+             WHERE ocr_status = 'SUCCEEDED' AND ocr_text IS NOT NULL",
+        )
+        .map_err(|e| AppError::migration(format!("Failed to prepare backfill query: {e}")))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let filename: String = row.get(1)?;
+            let ocr_text: String = row.get(2)?;
+            Ok((id, filename, ocr_text))
+        })
+        .map_err(|e| {
+            AppError::migration(format!("Failed to query screenshots for backfill: {e}"))
+        })?;
+
+    let mut count = 0;
+    for item in rows {
+        let (id, filename, ocr_text) =
+            item.map_err(|e| AppError::migration(format!("Failed to read backfill row: {e}")))?;
+        let search_text = crate::search::normalize::normalize_search_text(&ocr_text);
+        conn.execute(
+            "INSERT OR REPLACE INTO screenshots_fts (rowid, filename, ocr_search_text) 
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, filename, search_text],
+        )
+        .map_err(|e| AppError::migration(format!("Failed to backfill screenshot {id}: {e}")))?;
+        count += 1;
+    }
+
+    if count > 0 {
+        log::info!("Backfilled {count} existing OCR screenshot(s) into screenshots_fts");
+    }
+
+    Ok(())
+}
 
 /// Run all pending migrations.
 /// Uses a simple user_version-based mechanism.
@@ -72,6 +126,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), AppError> {
         conn.execute_batch(migration.sql).map_err(|e| {
             AppError::migration(format!("Migration v{} failed: {e}", migration.version))
         })?;
+
+        if migration.version == 2 {
+            backfill_fts_index(conn)?;
+        }
 
         conn.pragma_update(None, "user_version", migration.version)
             .map_err(|e| {
