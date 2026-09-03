@@ -1,9 +1,8 @@
 use serde::Serialize;
-use tauri::AppHandle;
-use tauri::Manager;
+use tauri::{AppHandle, Manager, State};
 
 use crate::db::connection::Database;
-use crate::errors::CommandResult;
+use crate::errors::{AppError, CommandResult};
 
 /// Basic application info returned to the frontend.
 #[derive(Debug, Serialize)]
@@ -14,7 +13,6 @@ pub struct AppInfo {
 }
 
 /// Returns basic application information.
-/// Thin command — delegates to app handle for data.
 #[tauri::command]
 pub fn get_app_info(app: AppHandle) -> CommandResult<AppInfo> {
     let version = app
@@ -34,14 +32,14 @@ pub fn get_app_info(app: AppHandle) -> CommandResult<AppInfo> {
 
 /// Returns database health status — confirms DB is accessible.
 #[tauri::command]
-pub fn check_database(db: tauri::State<'_, Database>) -> CommandResult<bool> {
+pub fn check_database(db: State<'_, Database>) -> CommandResult<bool> {
     let conn = db.conn.lock().map_err(|e| {
-        crate::errors::AppError::database(format!("Failed to acquire database lock: {e}"))
+        AppError::database(format!("Failed to acquire database lock: {e}"))
     })?;
 
     let result: i32 = conn
         .query_row("SELECT 1", [], |row| row.get(0))
-        .map_err(crate::errors::AppError::from)?;
+        .map_err(AppError::from)?;
 
     Ok(result == 1)
 }

@@ -1,6 +1,8 @@
-mod commands;
-mod db;
-mod errors;
+pub mod commands;
+pub mod db;
+pub mod errors;
+pub mod filesystem;
+pub mod indexing;
 
 use tauri::Manager;
 
@@ -17,6 +19,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_app_info,
             commands::check_database,
+            commands::list_folders,
+            commands::add_folder,
+            commands::remove_folder,
+            commands::scan_folder,
+            commands::pick_folder,
+            commands::get_total_screenshot_count,
         ])
         .setup(|app| {
             let app_data_dir = app

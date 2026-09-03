@@ -12,6 +12,12 @@ pub enum ErrorCode {
     FileNotFound,
     FilePermissionDenied,
     InvalidPath,
+    FolderNotFound,
+    FolderAlreadyExists,
+    FolderPermissionDenied,
+    FolderScanFailed,
+    FileMetadataFailed,
+    FileHashFailed,
     OcrFailed,
     IndexJobFailed,
     SettingsFailed,
@@ -48,6 +54,22 @@ impl AppError {
 
     pub fn migration(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::DatabaseMigrationFailed, message)
+    }
+
+    pub fn invalid_path(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::InvalidPath, message)
+    }
+
+    pub fn folder_not_found(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::FolderNotFound, message)
+    }
+
+    pub fn folder_already_exists(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::FolderAlreadyExists, message)
+    }
+
+    pub fn scan_failed(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::FolderScanFailed, message)
     }
 }
 

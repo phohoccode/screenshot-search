@@ -9,50 +9,54 @@
 
 ## Current Phase
 
-**Phase 1A — Project Bootstrap**  
+**Phase 1B — Folder Selection + Screenshot Discovery**  
 **Status:** Implementation complete, environment validation blocked
 
-Source code and configuration for Phase 1A are fully implemented. Frontend build validation is complete. Rust and Tauri compilation/runtime validation is currently blocked by a host environment prerequisite (missing MSVC `link.exe`).
+Source code, database operations, Rust scanner and discovery logic, unit tests, and React UI for Phase 1B are fully implemented. Frontend build validation is complete. Rust and Tauri compilation/runtime validation is currently blocked by the host environment prerequisite (missing MSVC `link.exe`).
 
 ---
 
 ## Validation Summary
 
 - `npm run typecheck` → **PASS** (0 TypeScript errors in `src/`)
-- `npm run build` → **PASS** (Vite v6 production bundle built successfully)
+- `npm run build` → **PASS** (Vite v6 production bundle built successfully with Folders UI)
 - `cargo check` → **BLOCKED** (Missing MSVC C++ Build Tools: `link.exe` not found for `stable-x86_64-pc-windows-msvc`)
+- `cargo test` → **BLOCKED** (Blocked by MSVC linker prerequisite)
 - `npm run tauri dev` → **BLOCKED** (Blocked by Rust compilation prerequisite)
 
 ---
 
 ## Completed
 
-- Product concept defined.
-- Local-first architecture selected.
-- Initial stack configured:
-  - Tauri 2
-  - React 19
-  - TypeScript
-  - Vite 6
-  - Tailwind CSS v4
-  - Rust
-  - SQLite (rusqlite bundled)
-  - SQLite FTS5 (foundation schema ready)
-- Privacy-first constraints defined.
-- Minimal SaaS / shadcn-style UI direction defined and documented in `docs/UI_DESIGN_SYSTEM.md`.
-- Shared UI primitives implemented: `button`, `input`, `dialog`, `alert-dialog`, `progress`, `dropdown-menu`, `tooltip`, `skeleton`.
-- Application shell and sidebar navigation implemented with dark/light theme support.
-- Rust core layer module boundaries defined (`commands`, `db`, `errors`).
-- SQLite integration with WAL mode and pragmas implemented.
-- Database migration runner and initial v1 schema implemented (`folders`, `screenshots`).
-- Shared typed error handling (`AppError`, `ErrorCode`, `CommandResult`) established.
-- Frontend build validated (`@types/node` installed, `npm run build` passing).
+### Phase 1A — Foundation
+- Product concept and local-first architecture defined.
+- Tauri 2 + React 19 + TypeScript + Vite 6 + Tailwind CSS v4 stack configured.
+- Minimal SaaS / shadcn-style UI primitives and design tokens established.
+- SQLite integration with WAL mode and initial schema migration v1 (`folders`, `screenshots`).
+- Shared typed error handling (`AppError`, `ErrorCode`, `CommandResult`).
+
+### Phase 1B — Folder Selection + Screenshot Discovery
+- **Native Folder Picker:** Integrated via `tauri-plugin-dialog` (`pick_folder` command) with browser mock fallback.
+- **Folder Persistence:** Normalized canonical folder paths persisted in SQLite with uniqueness enforcement (`FOLDER_ALREADY_EXISTS`).
+- **Recursive Image Discovery:** Safe traversal with `walkdir` preventing symlink recursion cycles and handling permission errors safely.
+- **Format Filtering:** Case-insensitive matching for `.png`, `.jpg`, `.jpeg`, `.webp`; non-image files (`.pdf`, `.exe`, `.txt`, etc.) strictly ignored.
+- **File Metadata:** Reads `path`, `filename`, `extension`, `file_size`, and RFC3339 `modified_at_fs`.
+- **File Fingerprinting:** Streaming 64KB SHA-256 content hashing (`sha2`) executed outside database transactions.
+- **Database Persistence & Reconciliation:**
+  - New files inserted with `ocr_status = 'PENDING'`.
+  - Modified files updated with new hash and `ocr_status` reset.
+  - Unchanged files skipped.
+  - Deleted files on disk reconciled and purged from database (never touches original files).
+- **Unit & Integration Tests:** 6 comprehensive tests in `src-tauri/src/filesystem/scanner_tests.rs` covering extension filtering, duplicate scan idempotency, file changes, file deletions, duplicate folder paths, and invalid path handling.
+- **Folders UI:** Responsive Minimal SaaS list of folder cards with image count badges, last scanned timestamps, Rescan button with loading spinner, and safe `AlertDialog` removal confirmation.
+- **App Placeholders:** Search and Indexing tabs updated to display discovered screenshot counts without fake search.
+- **Type-safe IPC:** `src/lib/tauri.ts` client wrapper supporting both Tauri runtime and browser dev preview.
 
 ---
 
 ## In Progress
 
-None (Phase 1A implementation complete; waiting for MSVC build tools environment setup to run Tauri/Rust validation).
+None (Phase 1B implementation complete; waiting for MSVC build tools environment setup to run Tauri/Rust validation).
 
 ---
 
@@ -66,25 +70,14 @@ None (Phase 1A implementation complete; waiting for MSVC build tools environment
 
 ## Next Recommended Work
 
-### Phase 1B — Folder and File Discovery
+### Phase 1C — OCR Pipeline
 
-1. Folder picker.
-2. Persist watched folders.
-3. Scan images recursively or according to selected configuration.
-4. Validate supported extensions.
-5. Read file metadata.
-6. Compute stable file identity/hash.
-7. Insert discovered screenshots into SQLite.
-
-### Phase 1C — OCR
-
-1. Select initial OCR implementation.
-2. Build OCR service abstraction.
-3. Execute OCR outside the UI thread.
+1. Select initial local OCR implementation (Windows Media OCR / PaddleOCR / ONNX-based local OCR).
+2. Build OCR service abstraction hiding engine specifics behind a clean Rust trait.
+3. Execute OCR outside the UI thread in bounded worker tasks.
 4. Normalize OCR text.
-5. Persist successful OCR result.
-6. Persist failure information separately.
-7. Add retry-safe behavior.
+5. Persist successful OCR result to `ocr_text` and `ocr_status = 'SUCCEEDED'`.
+6. Persist failure information with retry-safe behavior.
 
 ### Phase 1D — Keyword Search
 
@@ -180,21 +173,33 @@ Update this section before ending a major coding session.
 
 ```text
 Last completed task:
-- Phase 1A implementation and frontend build validation
+- Phase 1B — Folder Selection + Screenshot Discovery implementation and validation
 
 Files changed:
-- package.json
-- package-lock.json
+- src-tauri/Cargo.toml
+- src-tauri/Cargo.lock
+- src-tauri/src/errors.rs
+- src-tauri/src/lib.rs
+- src-tauri/src/filesystem/ (mod.rs, metadata.rs, fingerprint.rs, scanner.rs, scanner_tests.rs)
+- src-tauri/src/db/ (mod.rs, folders.rs, screenshots.rs)
+- src-tauri/src/indexing/ (mod.rs, discovery.rs)
+- src-tauri/src/commands/ (mod.rs, app.rs, folders.rs)
+- src/types/index.ts
+- src/lib/tauri.ts
+- src/features/folders/folders-page.tsx
+- src/features/search/search-page.tsx
+- src/features/indexing/indexing-page.tsx
 - CURRENT_STATUS.md
 
 Database migrations:
-- v1 (folders, screenshots table schema defined)
+- v1 (folders, screenshots table schema verified sufficient, no migration needed)
 
 Tests run:
 - npm run typecheck (PASS)
 - npm run build (PASS)
-- cargo check (BLOCKED - missing link.exe)
-- npm run tauri dev (BLOCKED - missing link.exe)
+- cargo check (BLOCKED - missing MSVC link.exe)
+- cargo test (BLOCKED - missing MSVC link.exe)
+- npm run tauri dev (BLOCKED - missing MSVC link.exe)
 
 Known failures:
 - MSVC linker link.exe not found on host machine
@@ -203,5 +208,5 @@ Current blocker:
 - Need Microsoft Visual Studio C++ Build Tools installed with "Desktop development with C++"
 
 Exact next task:
-- Install MSVC C++ Build Tools, verify cargo check / tauri dev, then proceed to Phase 1B (Folder and File Discovery)
+- Install MSVC C++ Build Tools, run cargo test / cargo check / tauri dev, then proceed to Phase 1C (OCR Pipeline)
 ```
