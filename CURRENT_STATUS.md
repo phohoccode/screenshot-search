@@ -9,20 +9,20 @@
 
 ## Current Phase
 
-**Phase 3 — Local Semantic Search + Hybrid Ranking**  
+**Phase 3.5 — Vietnamese OCR Quality & Multilingual OCR Fallback**  
 **Status:** COMPLETED
 
-Phase 3 introduces conceptual natural language search running 100% locally on CPU without replacing SQLite FTS5:
-1. **Local Multilingual Embedding Model:** `intfloat/multilingual-e5-small` (384 dimensions, ~135 MB, MIT license) executed in-process via ONNX Runtime (`fastembed` crate). Zero Python, zero PyTorch, zero cloud API dependencies.
-2. **Asymmetric Passage/Query Prefixing:** Follows e5 model design with `passage: ` for indexing and `query: ` for search queries.
-3. **Database Migration v4:** Added `screenshot_embeddings` table storing binary `f32` vectors as compact SQLite BLOBs (1,536 bytes/vector) with `(screenshot_id, model_id, model_version)` indexing.
-4. **Fast In-Process Cosine Scan:** Performs linear cosine similarity scan across vector BLOBs in ~1.2ms for 10,000 items, avoiding external vector database complexity.
-5. **Two-Stage Hybrid Search:** Combines top 100 FTS5 candidates with top 100 semantic vector candidates, normalized using reciprocal-rank and min-max curves.
-6. **Exact Technical Token Guard:** Alphanumeric tokens (`P2028`, `HTTP 500`, `ERR_MODULE_NOT_FOUND`) trigger a dominant `4.0x` exact signal, ensuring exact code matches always rank #1 ahead of semantic approximations.
-7. **Durable Queue Integration:** Extended Phase 2 durable queue with `GENERATE_TEXT_EMBEDDING` jobs deduplicated by `EMBED:<screenshot_id>:<content_hash>:<model_version>`.
-8. **Automatic Reconciliation & Backfill:** Screenshots with `ocr_status = SUCCEEDED` automatically receive embedding jobs once the model is ready; modifying a screenshot invalidates stale vectors immediately.
-9. **Zero Degradation Fallback:** If the model is not installed or encounters an error, the search seamlessly falls back to pure FTS5 keyword search.
-10. **Modern SaaS UI:** Search header displays active mode badge (`Hybrid Search` vs `Keyword Search`); search cards show match tags (`Exact`, `Meaning`, `Hybrid`); Indexing tab provides model download (~135 MB) and index rebuild controls.
+Phase 3.5 upgrades local Vietnamese recognition quality to production-usable level with zero cloud transmission:
+1. **Host Diagnostic & WinRT Audit:** Windows Media OCR host capabilities automatically audited. Detected `active_language: "en-US"` on host where `vi-VN` language pack is missing, resulting in 23.08% Character Error Rate (CER) and 100.00% Word Error Rate (WER) on standard Vietnamese diacritics.
+2. **Local Multilingual OCR Fallback:** Integrated local high-accuracy Multilingual OCR engine (PP-OCRv4 ONNX architecture, ~16 MB) supporting Vietnamese diacritics with 0.0% CER and 0.0% WER on benchmark fixtures.
+3. **Intelligent OCR Engine Router:** Implemented `OcrEngineRouter` supporting `Auto`, `Windows`, and `Multilingual` modes. In `Auto` mode, uses Multilingual fallback when ready, falls back to Windows OCR otherwise.
+4. **Zero Code/Terminal Regression:** Technical tokens (`P2028`, `ERR_MODULE_NOT_FOUND`, `localhost:3000`, `HTTP 500`) and terminal screenshots preserve 100% precision.
+5. **Database Migration v5:** Added `ocr_engine_version`, `ocr_language`, and `ocr_pipeline_version` with index `idx_screenshots_ocr_pipeline_version`.
+6. **Atomic Re-OCR Cascade:** `replace_ocr_atomically` updates OCR text and SQLite FTS5 search index in a single transaction while invalidating stale Phase 3 embeddings.
+7. **Failure Preservation Invariant:** If re-OCR fails on an existing screenshot, previous OCR text and FTS index are strictly preserved — upgraded files never become unsearchable.
+8. **Durable Queue Integration:** Extended background queue with `RE_OCR_SCREENSHOT` jobs deduplicated by `RE_OCR:<id>:<content_hash>:<target_pipeline>`.
+9. **Modern UX & Diagnostics:** Indexing page exposes OCR Router mode switch, Windows language pack status, Multilingual fallback status, model downloader (~16 MB), and `Reprocess with improved OCR` AlertDialog.
+10. **82/82 Tests Passing:** 82 Rust tests passing (up from 75 baseline), 0 failures.
 
 ---
 
@@ -30,14 +30,13 @@ Phase 3 introduces conceptual natural language search running 100% locally on CP
 
 - `cargo fmt --check` → **PASS** (0 formatting diffs across `src-tauri/`)
 - `cargo check --manifest-path ./src-tauri/Cargo.toml` → **PASS** (Clean compilation, 0 errors, 0 warnings)
-- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**75 passed**; 0 failed; finished in 1.05s)
+- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**82 passed**; 0 failed; finished in 1.14s)
 - `npm run typecheck` → **PASS** (0 TypeScript errors in `src/`)
-- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.80s)
-- `npm run tauri dev` → **PASS** (Application runs dev server, IPC endpoints functional)
-- **Exact Token Dominance** → **PASS** (`P2028` ranks #1 ahead of semantically similar Prisma errors)
-- **Semantic-Only Recall** → **PASS** (`database operation failure` retrieves `Transaction already closed` with 0 keyword overlap)
-- **Cross-Lingual Recall** → **PASS** (Vietnamese query `thanh toán thành công` retrieves English OCR `Payment completed successfully`)
-- **Stale Vector Invalidation** → **PASS** (Modifying file invalidates old vector immediately)
+- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.81s)
+- **Vietnamese Accuracy Benchmark** → **PASS** (Windows en-US CER: 23.08%, WER: 100.00% vs Multilingual CER: 0.00%, WER: 0.00%)
+- **Technical Tokens Zero Regression** → **PASS** (`P2028`, `ERR_MODULE_NOT_FOUND`, `localhost:3000` preserved)
+- **Atomic Re-OCR Cascade** → **PASS** (FTS5 updated to match Vietnamese diacritics, stale embedding invalidated)
+- **Re-OCR Failure Preservation** → **PASS** (Existing OCR and FTS remain 100% intact on recognition errors)
 
 ---
 

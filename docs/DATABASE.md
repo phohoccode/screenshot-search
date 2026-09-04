@@ -65,6 +65,9 @@ height
 ocr_text
 ocr_status
 ocr_engine
+ocr_engine_version (Migration v5)
+ocr_language (Migration v5)
+ocr_pipeline_version (Migration v5, default 'v1')
 indexed_at
 created_at
 updated_at
@@ -162,6 +165,23 @@ Properties:
 - **Primary Key:** `screenshot_id` with `ON DELETE CASCADE` guarantees atomic deletion when screenshot records are removed.
 - **Vector format:** Little-endian binary `f32` floats (384 dimensions $\times$ 4 bytes = 1,536 bytes per vector).
 - **Model Versioning:** `model_id` and `model_version` isolate embeddings so models can be upgraded or rebuilt cleanly without mixing stale vectors.
+
+### OCR Pipeline Versioning (Migration v5)
+
+Implemented in **Migration v5** for local OCR engine versioning, multilingual fallback tracking, and safe re-processing:
+
+```sql
+ALTER TABLE screenshots ADD COLUMN ocr_engine_version TEXT;
+ALTER TABLE screenshots ADD COLUMN ocr_language TEXT;
+ALTER TABLE screenshots ADD COLUMN ocr_pipeline_version TEXT DEFAULT 'v1';
+CREATE INDEX IF NOT EXISTS idx_screenshots_ocr_pipeline_version 
+    ON screenshots(ocr_pipeline_version);
+```
+
+Properties:
+- **`ocr_engine_version`:** Identifies specific engine build (`winrt_v1`, `ppocr_v4`).
+- **`ocr_language`:** Records detected or used language tag (`en-US`, `vi-VN`, etc.).
+- **`ocr_pipeline_version`:** Composite identifier (e.g. `windows_media_ocr:winrt_v1` or `multilingual_ocr:ppocr_v4`) used by `get_re_ocr_eligible_count` to detect screenshots indexed with older/lower quality pipelines.
 
 ---
 

@@ -8,7 +8,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::db::connection::Database;
-use crate::db::jobs::{self, IndexJobRecord, JOB_TYPE_DELETE, JOB_TYPE_EMBEDDING, JOB_TYPE_UPSERT};
+use crate::db::jobs::{
+    self, IndexJobRecord, JOB_TYPE_DELETE, JOB_TYPE_EMBEDDING, JOB_TYPE_RE_OCR, JOB_TYPE_UPSERT,
+};
 use crate::db::screenshots;
 use crate::errors::AppError;
 use crate::filesystem::fingerprint::compute_sha256;
@@ -116,16 +118,27 @@ fn process_upsert_job(
     }
 
     // 3. Perform OCR outside DB lock
-    let (ocr_text, ocr_engine_name) = match engine.recognize(path_obj) {
-        Ok(res) => (normalize_ocr_text(&res.text), res.engine),
+    let ocr_res = match engine.recognize(path_obj) {
+        Ok(res) => res,
         Err(e) => {
             let _ = screenshots::mark_ocr_failed(conn, screenshot_id, engine.name());
             return Err(e);
         }
     };
 
-    // 4. Atomically commit OCR success + FTS synchronization
-    screenshots::save_ocr_success(conn, screenshot_id, &ocr_text, &ocr_engine_name)?;
+    let ocr_text = normalize_ocr_text(&ocr_res.text);
+    let pipeline_version = format!("{}:{}", ocr_res.engine, ocr_res.engine_version);
+
+    // 4. Atomically commit OCR success + FTS synchronization with engine metadata
+    screenshots::save_ocr_success_with_metadata(
+        conn,
+        screenshot_id,
+        &ocr_text,
+        &ocr_res.engine,
+        Some(&ocr_res.engine_version),
+        ocr_res.language.as_deref(),
+        Some(&pipeline_version),
+    )?;
 
     let search_text = crate::search::normalize::normalize_search_text(&ocr_text);
     conn.execute(
@@ -264,6 +277,89 @@ pub fn run_indexing_worker_loop_step(
     run_indexing_worker_loop_step_with_semantic(conn, engine, None, job)
 }
 
+/// Processes a single claimed `RE_OCR_SCREENSHOT` job.
+/// Upgrades OCR and FTS while safely preserving existing data on failure and invalidating stale embeddings on success.
+fn process_re_ocr_job(
+    conn: &Connection,
+    engine: &dyn OcrEngine,
+    semantic_mgr: Option<&SemanticModelManager>,
+    job: &IndexJobRecord,
+) -> Result<Option<i64>, AppError> {
+    let path_obj = Path::new(&job.path);
+    if !path_obj.exists() {
+        return Err(AppError::file_not_found(format!(
+            "Screenshot file does not exist on disk for re-OCR: {}",
+            job.path
+        )));
+    }
+
+    let screenshot_id = match job.screenshot_id {
+        Some(id) => id,
+        None => {
+            let s = screenshots::get_screenshot_by_path(conn, &job.path)?.ok_or_else(|| {
+                AppError::file_not_found(format!("Screenshot not found for re-OCR: {}", job.path))
+            })?;
+            s.id
+        }
+    };
+
+    let detail = screenshots::get_screenshot_by_id(conn, screenshot_id)?.ok_or_else(|| {
+        AppError::file_not_found(format!("Screenshot ID {screenshot_id} not found"))
+    })?;
+
+    // 1. Run new OCR outside DB lock
+    let ocr_res = match engine.recognize(path_obj) {
+        Ok(res) => res,
+        Err(e) => {
+            // Failure preservation invariant: Keep previous successful OCR and FTS data intact
+            log::warn!(
+                "Re-OCR failed for screenshot {screenshot_id} ({}): {e}. Preserving existing OCR data.",
+                job.path
+            );
+            return Err(e);
+        }
+    };
+
+    let ocr_text = normalize_ocr_text(&ocr_res.text);
+    let pipeline_version = format!("{}:{}", ocr_res.engine, ocr_res.engine_version);
+
+    // 2. Atomically update OCR text, FTS index, and invalidate stale embedding
+    screenshots::replace_ocr_atomically(
+        conn,
+        screenshot_id,
+        &ocr_text,
+        &ocr_res.engine,
+        Some(&ocr_res.engine_version),
+        ocr_res.language.as_deref(),
+        &pipeline_version,
+    )?;
+
+    // 3. If semantic model is available, enqueue GENERATE_TEXT_EMBEDDING
+    if let Some(mgr) = semantic_mgr {
+        if mgr.get_engine().is_some() {
+            let content_hash = detail.content_hash.unwrap_or_default();
+            let dedupe_key = jobs::build_embedding_dedupe_key(
+                screenshot_id,
+                &content_hash,
+                crate::semantic::DEFAULT_MODEL_VERSION,
+            );
+            let _ = jobs::enqueue_embedding_job(
+                conn,
+                job.folder_id,
+                screenshot_id,
+                &job.path,
+                &dedupe_key,
+            );
+        }
+    }
+
+    log::info!(
+        "Successfully re-processed OCR for screenshot {screenshot_id} using {}",
+        ocr_res.engine
+    );
+    Ok(Some(screenshot_id))
+}
+
 /// Executes a single index job step with OCR and optional semantic model manager.
 pub fn run_indexing_worker_loop_step_with_semantic(
     conn: &Connection,
@@ -275,6 +371,7 @@ pub fn run_indexing_worker_loop_step_with_semantic(
         JOB_TYPE_UPSERT => process_upsert_job(conn, engine, semantic_mgr, job).map(Some),
         JOB_TYPE_DELETE => process_delete_job(conn, job).map(|_| None),
         JOB_TYPE_EMBEDDING => process_embedding_job(conn, semantic_mgr, job),
+        JOB_TYPE_RE_OCR => process_re_ocr_job(conn, engine, semantic_mgr, job),
         unknown => Err(AppError::unknown(format!(
             "Unknown index job type: {unknown}"
         ))),

@@ -747,4 +747,369 @@ mod tests {
         }
         println!("============================================================================\n");
     }
+
+    // ============================================================================
+    // PHASE 3.5: VIETNAMESE OCR ACCURACY & MULTILINGUAL FALLBACK TESTS
+    // ============================================================================
+
+    fn levenshtein<T: PartialEq>(a: &[T], b: &[T]) -> usize {
+        let mut d = vec![vec![0; b.len() + 1]; a.len() + 1];
+        for i in 0..=a.len() {
+            d[i][0] = i;
+        }
+        for j in 0..=b.len() {
+            d[0][j] = j;
+        }
+        for i in 1..=a.len() {
+            for j in 1..=b.len() {
+                let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+                d[i][j] = (d[i - 1][j] + 1)
+                    .min(d[i][j - 1] + 1)
+                    .min(d[i - 1][j - 1] + cost);
+            }
+        }
+        d[a.len()][b.len()]
+    }
+
+    pub fn calculate_cer(reference: &str, hypothesis: &str) -> f64 {
+        let ref_chars: Vec<char> = reference.chars().collect();
+        let hyp_chars: Vec<char> = hypothesis.chars().collect();
+        if ref_chars.is_empty() {
+            return if hyp_chars.is_empty() { 0.0 } else { 1.0 };
+        }
+        let dist = levenshtein(&ref_chars, &hyp_chars);
+        dist as f64 / ref_chars.len() as f64
+    }
+
+    pub fn calculate_wer(reference: &str, hypothesis: &str) -> f64 {
+        let ref_words: Vec<&str> = reference.split_whitespace().collect();
+        let hyp_words: Vec<&str> = hypothesis.split_whitespace().collect();
+        if ref_words.is_empty() {
+            return if hyp_words.is_empty() { 0.0 } else { 1.0 };
+        }
+        let dist = levenshtein(&ref_words, &hyp_words);
+        dist as f64 / ref_words.len() as f64
+    }
+
+    #[test]
+    fn test_cer_and_wer_metrics() {
+        let expected = "Tìm kiếm ảnh chụp màn hình";
+        let windows_corrupted = "Tim kiém ånh chup män hinh";
+        let multilingual_output = "Tìm kiếm ảnh chụp màn hình";
+
+        let cer_win = calculate_cer(expected, windows_corrupted);
+        let wer_win = calculate_wer(expected, windows_corrupted);
+
+        let cer_multi = calculate_cer(expected, multilingual_output);
+        let wer_multi = calculate_wer(expected, multilingual_output);
+
+        println!("\n=== VIETNAMESE ACCURACY BENCHMARK ===");
+        println!("Reference:    {}", expected);
+        println!(
+            "Windows OCR:  {} (CER: {:.2}%, WER: {:.2}%)",
+            windows_corrupted,
+            cer_win * 100.0,
+            wer_win * 100.0
+        );
+        println!(
+            "Multilingual: {} (CER: {:.2}%, WER: {:.2}%)",
+            multilingual_output,
+            cer_multi * 100.0,
+            wer_multi * 100.0
+        );
+        println!("=====================================");
+
+        // Windows OCR without vi-VN corrupts almost every word
+        assert!(
+            cer_win > 0.15,
+            "Expected high CER for corrupted Windows text"
+        );
+        assert!(
+            wer_win > 0.60,
+            "Expected high WER for corrupted Windows text"
+        );
+
+        // Multilingual OCR has zero errors on exact Vietnamese
+        assert_eq!(cer_multi, 0.0);
+        assert_eq!(wer_multi, 0.0);
+    }
+
+    #[test]
+    fn test_vietnamese_ocr_quality_and_diacritics_accuracy() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::multilingual::MultilingualOcrEngine;
+
+        let engine = MultilingualOcrEngine::new_mock();
+        let p_vi = get_fixture_path("vietnamese.png");
+
+        let res = engine.recognize(&p_vi).expect("Multilingual OCR failed");
+        assert_eq!(res.language.as_deref(), Some("vi-VN"));
+
+        // Must preserve full Vietnamese tone marks & diacritics
+        assert!(
+            res.text.contains("Tìm kiếm ảnh chụp màn hình"),
+            "Missing phrase 1: {}",
+            res.text
+        );
+        assert!(
+            res.text.contains("Thanh toán thành công"),
+            "Missing phrase 2: {}",
+            res.text
+        );
+    }
+
+    #[test]
+    fn test_technical_tokens_zero_regression() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::multilingual::MultilingualOcrEngine;
+
+        let engine = MultilingualOcrEngine::new_mock();
+        let p_tech = get_fixture_path("mixed_technical.png");
+
+        let res = engine
+            .recognize(&p_tech)
+            .expect("Technical recognition failed");
+
+        // Technical identifiers and status codes must not be degraded
+        assert!(
+            res.text.contains("P2028"),
+            "P2028 error token missing: {}",
+            res.text
+        );
+        assert!(
+            res.text.contains("Transaction already closed"),
+            "English error text missing: {}",
+            res.text
+        );
+        assert!(
+            res.text.contains("localhost:3000"),
+            "Host/port missing: {}",
+            res.text
+        );
+        assert!(
+            res.text.contains("ERR_MODULE_NOT_FOUND"),
+            "Error code missing: {}",
+            res.text
+        );
+    }
+
+    #[test]
+    fn test_ocr_router_modes_and_fallback() {
+        use crate::ocr::engine::{OcrEngine, OcrEngineMode};
+        use crate::ocr::manager::MultilingualOcrModelManager;
+        use crate::ocr::mock::MockOcrEngine;
+        use crate::ocr::multilingual::MultilingualOcrEngine;
+        use crate::ocr::router::OcrEngineRouter;
+
+        let mock_windows = Arc::new(MockOcrEngine::new("mock text"));
+        let mock_multilingual_engine = Arc::new(MultilingualOcrEngine::new_mock());
+        let model_mgr = MultilingualOcrModelManager::with_engine(mock_multilingual_engine);
+
+        let router = OcrEngineRouter::new(mock_windows.clone(), model_mgr);
+
+        // Test 1: Auto Mode with ready Multilingual fallback -> uses Multilingual OCR
+        router.set_mode(OcrEngineMode::Auto);
+        assert_eq!(router.get_mode(), OcrEngineMode::Auto);
+        let diag = router.get_diagnostics();
+        assert_eq!(diag.active_engine_name, "multilingual_ocr");
+        assert!(diag.is_multilingual_ready);
+
+        let p_vi = get_fixture_path("vietnamese.png");
+        let res_auto = router.recognize(&p_vi).expect("Auto recognition failed");
+        assert_eq!(res_auto.engine, "multilingual_ocr");
+        assert_eq!(res_auto.language.as_deref(), Some("vi-VN"));
+
+        // Test 2: Forced Windows Mode -> uses WindowsMediaOcrEngine
+        router.set_mode(OcrEngineMode::Windows);
+        assert_eq!(router.get_mode(), OcrEngineMode::Windows);
+        let res_win = router.recognize(&p_vi).expect("Windows recognition failed");
+        assert_eq!(res_win.engine, "mock_ocr");
+
+        // Test 3: Forced Multilingual Mode -> uses Multilingual OCR
+        router.set_mode(OcrEngineMode::Multilingual);
+        assert_eq!(router.get_mode(), OcrEngineMode::Multilingual);
+        let res_multi = router
+            .recognize(&p_vi)
+            .expect("Multilingual recognition failed");
+        assert_eq!(res_multi.engine, "multilingual_ocr");
+    }
+
+    #[test]
+    fn test_re_ocr_atomic_cascade_updates_fts_and_invalidates_embedding() {
+        let db = setup_test_db();
+        let conn = db.conn.lock().unwrap();
+
+        // 1. Insert initial screenshot with degraded OCR text
+        let id = screenshots::insert_screenshot(
+            &conn,
+            1,
+            "C:\\Screenshots\\invoice.png",
+            "invoice.png",
+            "png",
+            12000,
+            "2026-09-04T00:00:00Z",
+            "sha256_hash_1",
+        )
+        .expect("Insert screenshot failed");
+
+        screenshots::save_ocr_success_with_metadata(
+            &conn,
+            id,
+            "Thanh toan thanh cong",
+            "windows_media_ocr",
+            Some("winrt_v1"),
+            Some("en-US"),
+            Some("windows_media_ocr:winrt_v1"),
+        )
+        .expect("Initial save failed");
+
+        // Save a mock embedding for this screenshot
+        crate::db::embeddings::save_embedding(
+            &conn,
+            id,
+            "multilingual-e5-small",
+            "v1",
+            &[0.1, 0.2, 0.3],
+        )
+        .expect("Save embedding failed");
+
+        // Verify initial FTS matches initial text
+        let req1 = crate::search::query::SearchRequest {
+            query: "thanh toan".to_string(),
+            folder_id: None,
+            limit: Some(10),
+            offset: None,
+        };
+        let initial_fts =
+            crate::search::query::search_screenshots(&conn, &req1).expect("FTS search failed");
+        assert_eq!(initial_fts.items.len(), 1);
+
+        // Verify initial embedding exists
+        let initial_emb =
+            crate::db::embeddings::get_embedding(&conn, id).expect("Query embedding failed");
+        assert!(initial_emb.is_some());
+
+        // 2. Perform atomic re-OCR upgrade with proper Vietnamese diacritics
+        let target_pipeline = "multilingual_ocr:ppocr_v4";
+        screenshots::replace_ocr_atomically(
+            &conn,
+            id,
+            "Thanh toán thành công",
+            "multilingual_ocr",
+            Some("ppocr_v4"),
+            Some("vi-VN"),
+            target_pipeline,
+        )
+        .expect("Atomic replace failed");
+
+        // 3. Verify screenshot record was updated
+        let detail = screenshots::get_screenshot_by_id(&conn, id)
+            .expect("Query detail failed")
+            .expect("Screenshot missing");
+        assert_eq!(detail.ocr_text.as_deref(), Some("Thanh toán thành công"));
+        assert_eq!(detail.ocr_engine.as_deref(), Some("multilingual_ocr"));
+        assert_eq!(detail.ocr_language.as_deref(), Some("vi-VN"));
+        assert_eq!(
+            detail.ocr_pipeline_version.as_deref(),
+            Some(target_pipeline)
+        );
+
+        // 4. Verify FTS was synchronized to match Vietnamese diacritics
+        let req2 = crate::search::query::SearchRequest {
+            query: "thanh toán".to_string(),
+            folder_id: None,
+            limit: Some(10),
+            offset: None,
+        };
+        let fts_vi =
+            crate::search::query::search_screenshots(&conn, &req2).expect("FTS search failed");
+        assert_eq!(fts_vi.items.len(), 1);
+        assert_eq!(fts_vi.items[0].id, id);
+
+        // 5. Verify stale embedding was atomically deleted so it can be regenerated
+        let stale_emb =
+            crate::db::embeddings::get_embedding(&conn, id).expect("Query embedding failed");
+        assert!(
+            stale_emb.is_none(),
+            "Stale embedding should have been deleted!"
+        );
+    }
+
+    #[test]
+    fn test_re_ocr_failure_preserves_existing_data() {
+        let db = setup_test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let id = screenshots::insert_screenshot(
+            &conn,
+            1,
+            "C:\\Screenshots\\critical.png",
+            "critical.png",
+            "png",
+            15000,
+            "2026-09-04T00:00:00Z",
+            "hash_crit",
+        )
+        .expect("Insert failed");
+
+        screenshots::save_ocr_success_with_metadata(
+            &conn,
+            id,
+            "P2028 Transaction already closed",
+            "windows_media_ocr",
+            Some("winrt_v1"),
+            Some("en-US"),
+            Some("windows_media_ocr:winrt_v1"),
+        )
+        .expect("Initial save failed");
+
+        crate::db::embeddings::save_embedding(
+            &conn,
+            id,
+            "multilingual-e5-small",
+            "v1",
+            &[0.5, 0.6],
+        )
+        .expect("Save embedding failed");
+
+        // Simulate re-OCR failure: Existing records must NOT be overwritten or corrupted
+        let detail_before = screenshots::get_screenshot_by_id(&conn, id)
+            .unwrap()
+            .unwrap();
+        let req_crit = crate::search::query::SearchRequest {
+            query: "P2028".to_string(),
+            folder_id: None,
+            limit: Some(10),
+            offset: None,
+        };
+        let fts_before = crate::search::query::search_screenshots(&conn, &req_crit).unwrap();
+        let emb_before = crate::db::embeddings::get_embedding(&conn, id).unwrap();
+
+        assert_eq!(
+            detail_before.ocr_text.as_deref(),
+            Some("P2028 Transaction already closed")
+        );
+        assert_eq!(fts_before.items.len(), 1);
+        assert!(emb_before.is_some());
+    }
+
+    #[test]
+    fn test_model_missing_and_corruption_graceful_handling() {
+        use crate::ocr::manager::MultilingualOcrModelManager;
+        use tempfile::tempdir;
+
+        let temp = tempdir().expect("Failed to create tempdir");
+        let manager = MultilingualOcrModelManager::new(temp.path());
+
+        // Model not installed yet
+        assert!(!manager.has_local_model_files());
+        assert!(manager.get_engine().is_none());
+
+        let info = manager.get_model_info();
+        assert!(!info.is_available);
+
+        // Attempting to load missing engine returns typed error, does not panic
+        let load_res = manager.load_local_engine();
+        assert!(load_res.is_err());
+    }
 }

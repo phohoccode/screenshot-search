@@ -95,6 +95,12 @@ pub fn run() {
             commands::download_semantic_model,
             commands::rebuild_semantic_index,
             commands::get_embedding_stats,
+            commands::get_ocr_engine_diagnostics,
+            commands::set_ocr_engine_mode,
+            commands::download_multilingual_ocr_model,
+            commands::get_ocr_engine_stats,
+            commands::get_re_ocr_eligible_count,
+            commands::reprocess_screenshots_with_improved_ocr,
         ])
         .setup(|app| {
             let app_data_dir = app
@@ -114,17 +120,21 @@ pub fn run() {
             }
 
             #[cfg(target_os = "windows")]
-            let ocr_engine: std::sync::Arc<dyn ocr::engine::OcrEngine> =
+            let windows_ocr_engine: std::sync::Arc<dyn ocr::engine::OcrEngine> =
                 std::sync::Arc::new(ocr::windows::WindowsMediaOcrEngine::new());
             #[cfg(not(target_os = "windows"))]
-            let ocr_engine: std::sync::Arc<dyn ocr::engine::OcrEngine> =
+            let windows_ocr_engine: std::sync::Arc<dyn ocr::engine::OcrEngine> =
                 std::sync::Arc::new(ocr::mock::MockOcrEngine::new());
+
+            let ocr_model_mgr = ocr::manager::MultilingualOcrModelManager::new(&app_data_dir);
+            let ocr_router =
+                ocr::router::OcrEngineRouter::new(windows_ocr_engine, ocr_model_mgr.clone());
 
             let semantic_mgr = semantic::SemanticModelManager::new(&app_data_dir);
             let watcher_manager = watcher::WatcherManager::new(database.clone());
             let indexing_service = indexing::service::IndexingService::with_semantic(
                 database.clone(),
-                ocr_engine,
+                ocr_router.clone(),
                 semantic_mgr,
                 watcher_manager,
             );
@@ -143,6 +153,8 @@ pub fn run() {
 
             app.manage(database);
             app.manage(ocr::OcrManager::new());
+            app.manage(ocr_router);
+            app.manage(ocr_model_mgr);
             app.manage(indexing_service);
 
             log::info!("Screenshot Search initialized successfully");

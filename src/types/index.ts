@@ -112,6 +112,39 @@ export interface SearchResultPage {
   hasMore: boolean;
 }
 
+export type OcrEngineMode = "Auto" | "Windows" | "Multilingual";
+
+export type MultilingualOcrStatus =
+  | { status: "notInstalled" }
+  | { status: "downloading"; percent: number }
+  | { status: "ready" }
+  | { status: "error"; message: string };
+
+export interface MultilingualOcrModelInfo {
+  modelId: string;
+  modelVersion: string;
+  status: MultilingualOcrStatus;
+  isAvailable: boolean;
+  approximateSizeMb: number;
+}
+
+export interface OcrEngineDiagnostics {
+  mode: OcrEngineMode;
+  activeEngineName: string;
+  windowsInfo: OcrEngineInfo;
+  multilingualInfo: MultilingualOcrModelInfo;
+  windowsSupportsVietnamese: boolean;
+  isMultilingualReady: boolean;
+}
+
+export interface OcrEngineStats {
+  totalSucceeded: number;
+  windowsCount: number;
+  multilingualCount: number;
+  outdatedPipelineCount: number;
+  failedCount: number;
+}
+
 /** Complete detail of a single screenshot */
 export interface ScreenshotDetail {
   id: number;
@@ -127,6 +160,9 @@ export interface ScreenshotDetail {
   ocrText?: string | null;
   ocrStatus: string;
   ocrEngine?: string | null;
+  ocrEngineVersion?: string | null;
+  ocrLanguage?: string | null;
+  ocrPipelineVersion?: string | null;
   indexedAt?: string | null;
 }
 

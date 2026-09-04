@@ -92,6 +92,10 @@ impl AppError {
         Self::new(ErrorCode::FileNotFound, message)
     }
 
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Unknown, message)
+    }
+
     pub fn unknown(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::Unknown, message)
     }

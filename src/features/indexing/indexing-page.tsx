@@ -18,6 +18,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   getOcrStats,
   getOcrEngineInfo,
   getIndexingStatus,
@@ -30,6 +40,12 @@ import {
   rebuildSemanticIndex,
   getEmbeddingStats,
   onSemanticModelReady,
+  getOcrEngineDiagnostics,
+  setOcrEngineMode,
+  downloadMultilingualOcrModel,
+  getReOcrEligibleCount,
+  reprocessScreenshotsWithImprovedOcr,
+  onOcrModelStatusChanged,
 } from "@/lib/tauri";
 import type {
   OcrStats,
@@ -37,6 +53,8 @@ import type {
   IndexingServiceStatus,
   SemanticModelInfo,
   EmbeddingStats,
+  OcrEngineDiagnostics,
+  OcrEngineMode,
 } from "@/types";
 
 export function IndexingPage() {
@@ -45,23 +63,31 @@ export function IndexingPage() {
   const [serviceStatus, setServiceStatus] = useState<IndexingServiceStatus | null>(null);
   const [modelInfo, setModelInfo] = useState<SemanticModelInfo | null>(null);
   const [embeddingStats, setEmbeddingStats] = useState<EmbeddingStats | null>(null);
+  const [ocrDiagnostics, setOcrDiagnostics] = useState<OcrEngineDiagnostics | null>(null);
+  const [reOcrEligibleCount, setReOcrEligibleCount] = useState<number>(0);
 
   const [isTogglingPause, setIsTogglingPause] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
   const [isDownloadingModel, setIsDownloadingModel] = useState(false);
   const [isRebuildingEmbeddings, setIsRebuildingEmbeddings] = useState(false);
+  const [isDownloadingOcrModel, setIsDownloadingOcrModel] = useState(false);
+  const [isReprocessing, setIsReprocessing] = useState(false);
+  const [isReprocessDialogOpen, setIsReprocessDialogOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const pollingRef = useRef<number | null>(null);
 
   const refreshAll = useCallback(async () => {
     try {
-      const [statsData, statusData, modelData, embData] = await Promise.all([
-        getOcrStats(),
-        getIndexingStatus().catch(() => null),
-        getSemanticModelInfo().catch(() => null),
-        getEmbeddingStats().catch(() => null),
-      ]);
+      const [statsData, statusData, modelData, embData, ocrDiagData, eligibleData] =
+        await Promise.all([
+          getOcrStats(),
+          getIndexingStatus().catch(() => null),
+          getSemanticModelInfo().catch(() => null),
+          getEmbeddingStats().catch(() => null),
+          getOcrEngineDiagnostics().catch(() => null),
+          getReOcrEligibleCount().catch(() => 0),
+        ]);
       setOcrStats(statsData);
       if (statusData) {
         setServiceStatus(statusData);
@@ -75,6 +101,13 @@ export function IndexingPage() {
       if (embData) {
         setEmbeddingStats(embData);
       }
+      if (ocrDiagData) {
+        setOcrDiagnostics(ocrDiagData);
+        if (ocrDiagData.isMultilingualReady) {
+          setIsDownloadingOcrModel(false);
+        }
+      }
+      setReOcrEligibleCount(eligibleData ?? 0);
     } catch (err) {
       console.error("Failed to load indexing stats", err);
     }
@@ -100,12 +133,21 @@ export function IndexingPage() {
       unlistenSemantic = fn;
     });
 
+    // Listen to multilingual OCR model status updates
+    let unlistenOcrModel: (() => void) | undefined;
+    onOcrModelStatusChanged(() => {
+      refreshAll();
+    }).then((fn) => {
+      unlistenOcrModel = fn;
+    });
+
     // Periodic lightweight refresh every 3 seconds to keep metrics fresh
     pollingRef.current = window.setInterval(refreshAll, 3000);
 
     return () => {
       if (unlistenIndexing) unlistenIndexing();
       if (unlistenSemantic) unlistenSemantic();
+      if (unlistenOcrModel) unlistenOcrModel();
       if (pollingRef.current) clearInterval(pollingRef.current);
     };
   }, [refreshAll]);
@@ -181,6 +223,60 @@ export function IndexingPage() {
       setIsRebuildingEmbeddings(false);
     }
   };
+
+  const handleSetEngineMode = async (mode: OcrEngineMode) => {
+    setErrorMessage(null);
+    try {
+      await setOcrEngineMode(mode);
+      await refreshAll();
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === "object" && "message" in err
+          ? (err as { message: string }).message
+          : "Failed to set OCR engine mode";
+      setErrorMessage(msg);
+    }
+  };
+
+  const handleDownloadOcrModel = async () => {
+    setIsDownloadingOcrModel(true);
+    setErrorMessage(null);
+    try {
+      await downloadMultilingualOcrModel();
+      await refreshAll();
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === "object" && "message" in err
+          ? (err as { message: string }).message
+          : "Failed to start multilingual OCR model download";
+      setErrorMessage(msg);
+      setIsDownloadingOcrModel(false);
+    }
+  };
+
+  const handleReprocessOcr = async () => {
+    setIsReprocessing(true);
+    setIsReprocessDialogOpen(false);
+    setErrorMessage(null);
+    try {
+      await reprocessScreenshotsWithImprovedOcr();
+      await refreshAll();
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === "object" && "message" in err
+          ? (err as { message: string }).message
+          : "Failed to queue screenshots for re-OCR";
+      setErrorMessage(msg);
+    } finally {
+      setIsReprocessing(false);
+    }
+  };
+
+  const activeMode = ocrDiagnostics?.mode ?? "Auto";
+  const isMultilingualReady = ocrDiagnostics?.isMultilingualReady ?? false;
+  const isMultilingualDownloading =
+    isDownloadingOcrModel ||
+    ocrDiagnostics?.multilingualInfo.status.status === "downloading";
 
   // Metric computations
   const total = ocrStats?.total ?? 0;
@@ -354,6 +450,158 @@ export function IndexingPage() {
               </div>
             </div>
           </div>
+
+          {/* Phase 3.5: OCR Engine Router & Vietnamese Quality Card */}
+          <div className="rounded-lg border border-border bg-card p-6 shadow-xs">
+            <div className="flex items-center justify-between pb-4 border-b border-border">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted text-primary">
+                  <Languages className="h-5 w-5" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold text-foreground">
+                    OCR Engine &amp; Vietnamese Recognition
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    Intelligent routing between native Windows Media OCR and local Multilingual fallback
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1 bg-muted p-0.5 rounded-lg border border-border">
+                <button
+                  type="button"
+                  onClick={() => handleSetEngineMode("Auto")}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    activeMode === "Auto"
+                      ? "bg-background text-foreground shadow-xs"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Auto
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSetEngineMode("Windows")}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    activeMode === "Windows"
+                      ? "bg-background text-foreground shadow-xs"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Windows
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSetEngineMode("Multilingual")}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    activeMode === "Multilingual"
+                      ? "bg-background text-foreground shadow-xs"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Multilingual
+                </button>
+              </div>
+            </div>
+
+            {/* Language & Engine Diagnostics */}
+            <div className="mt-5 space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                <div className="flex items-center justify-between bg-muted/30 p-2.5 rounded border border-border/50">
+                  <span className="text-muted-foreground">Windows vi-VN OCR:</span>
+                  {ocrDiagnostics?.windowsSupportsVietnamese ? (
+                    <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                      Installed
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">Not installed in Windows</span>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between bg-muted/30 p-2.5 rounded border border-border/50">
+                  <span className="text-muted-foreground">Multilingual Fallback:</span>
+                  {isMultilingualReady ? (
+                    <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                      Ready (PP-OCRv4)
+                    </span>
+                  ) : isMultilingualDownloading ? (
+                    <span className="font-medium text-primary flex items-center gap-1">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Downloading
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">Not installed</span>
+                  )}
+                </div>
+              </div>
+
+              {!isMultilingualReady && (
+                <div className="flex items-center justify-between bg-primary/5 border border-primary/20 rounded-md p-3 text-xs">
+                  <span className="text-muted-foreground">
+                    For high accuracy on Vietnamese screenshots and complex UI text, download the local multilingual model (~16 MB).
+                  </span>
+                  <Button
+                    size="sm"
+                    onClick={handleDownloadOcrModel}
+                    disabled={isMultilingualDownloading}
+                    className="h-7 gap-1.5 text-xs shrink-0 ml-3"
+                  >
+                    {isMultilingualDownloading ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Download className="h-3 w-3" />
+                    )}
+                    Download Fallback (~16 MB)
+                  </Button>
+                </div>
+              )}
+
+              {/* Reprocess / Re-OCR Section */}
+              <div className="pt-3 border-t border-border flex items-center justify-between text-xs">
+                <div>
+                  <span className="text-muted-foreground">
+                    Re-OCR eligible:{" "}
+                    <strong className="text-foreground font-mono font-medium">
+                      {reOcrEligibleCount}
+                    </strong>{" "}
+                    screenshot(s)
+                  </span>
+                </div>
+
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setIsReprocessDialogOpen(true)}
+                  disabled={reOcrEligibleCount === 0 || isReprocessing}
+                  className="h-7 gap-1.5 text-xs"
+                >
+                  <RefreshCw className={`h-3 w-3 ${isReprocessing ? "animate-spin" : ""}`} />
+                  {isReprocessing ? "Queueing..." : "Reprocess with improved OCR"}
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Re-OCR Confirmation Dialog */}
+          <AlertDialog open={isReprocessDialogOpen} onOpenChange={setIsReprocessDialogOpen}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Reprocess screenshots with improved OCR?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will re-run OCR for {reOcrEligibleCount} existing screenshot(s) using the improved engine.
+                  Text will be upgraded, the FTS index refreshed, and semantic embeddings regenerated.
+                  Original image files will not be modified.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={handleReprocessOcr}>
+                  Start Re-processing
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
 
           {/* Phase 3: Semantic Embeddings Card */}
           <div className="rounded-lg border border-border bg-card p-6 shadow-xs">

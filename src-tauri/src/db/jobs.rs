@@ -7,6 +7,7 @@ use crate::errors::AppError;
 pub const JOB_TYPE_UPSERT: &str = "UPSERT_SCREENSHOT";
 pub const JOB_TYPE_DELETE: &str = "DELETE_SCREENSHOT";
 pub const JOB_TYPE_EMBEDDING: &str = "GENERATE_TEXT_EMBEDDING";
+pub const JOB_TYPE_RE_OCR: &str = "RE_OCR_SCREENSHOT";
 
 /// Lifecycle status of an index job.
 pub const JOB_STATUS_PENDING: &str = "PENDING";
@@ -177,6 +178,68 @@ pub fn enqueue_embedding_job(
         .map_err(|e| {
             AppError::database(format!("Failed to enqueue embedding job for {path}: {e}"))
         })?;
+
+    Ok(inserted_id)
+}
+
+/// Helper to generate a standardized deduplication key for re-OCR jobs.
+pub fn build_re_ocr_dedupe_key(
+    screenshot_id: i64,
+    content_hash: &str,
+    target_pipeline_version: &str,
+) -> String {
+    format!("RE_OCR:{screenshot_id}:{content_hash}:{target_pipeline_version}")
+}
+
+/// Enqueues a RE_OCR_SCREENSHOT job into the durable SQLite index_jobs table.
+pub fn enqueue_re_ocr_job(
+    conn: &Connection,
+    folder_id: i64,
+    screenshot_id: i64,
+    path: &str,
+    dedupe_key: &str,
+) -> Result<Option<i64>, AppError> {
+    let existing_active: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM index_jobs 
+             WHERE dedupe_key = ?1 AND status IN ('PENDING', 'PROCESSING')",
+            params![dedupe_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| {
+            AppError::database(format!("Failed to check existing active re-OCR job: {e}"))
+        })?;
+
+    if existing_active.is_some() {
+        return Ok(None);
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "INSERT INTO index_jobs (folder_id, screenshot_id, path, job_type, dedupe_key, status, available_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', datetime('now'), datetime('now'))
+             ON CONFLICT(dedupe_key) DO UPDATE SET
+                 status = 'PENDING',
+                 attempts = 0,
+                 available_at = datetime('now'),
+                 lease_until = NULL,
+                 last_error_code = NULL,
+                 last_error_message = NULL,
+                 completed_at = NULL,
+                 updated_at = datetime('now')
+             WHERE status IN ('FAILED', 'SUCCEEDED')
+             RETURNING id",
+        )
+        .map_err(|e| AppError::database(format!("Failed to prepare enqueue re-OCR statement: {e}")))?;
+
+    let inserted_id: Option<i64> = stmt
+        .query_row(
+            params![folder_id, screenshot_id, path, JOB_TYPE_RE_OCR, dedupe_key,],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| AppError::database(format!("Failed to enqueue re-OCR job for {path}: {e}")))?;
 
     Ok(inserted_id)
 }

@@ -157,3 +157,133 @@ pub fn retry_failed_index_jobs(
 ) -> CommandResult<usize> {
     service.retry_failed()
 }
+
+/// Retrieves combined diagnostic information about Windows OCR languages and multilingual fallback model.
+#[tauri::command]
+pub fn get_ocr_engine_diagnostics(
+    router: State<'_, std::sync::Arc<crate::ocr::router::OcrEngineRouter>>,
+) -> CommandResult<crate::ocr::router::OcrEngineDiagnostics> {
+    Ok(router.get_diagnostics())
+}
+
+/// Updates the active OCR Engine Router mode (`Auto`, `Windows`, `Multilingual`).
+#[tauri::command]
+pub fn set_ocr_engine_mode(
+    router: State<'_, std::sync::Arc<crate::ocr::router::OcrEngineRouter>>,
+    mode: crate::ocr::engine::OcrEngineMode,
+) -> CommandResult<()> {
+    router.set_mode(mode);
+    Ok(())
+}
+
+/// Triggers on-demand background download of the local multilingual OCR model.
+#[tauri::command]
+pub async fn download_multilingual_ocr_model(
+    app: AppHandle,
+    router: State<'_, std::sync::Arc<crate::ocr::router::OcrEngineRouter>>,
+) -> CommandResult<()> {
+    let model_mgr = router.get_model_manager();
+    let app_clone = app.clone();
+
+    model_mgr.start_download(Some(std::sync::Arc::new(move || {
+        let _ = app_clone.emit("ocr_model_status_changed", ());
+    })))?;
+
+    Ok(())
+}
+
+/// Retrieves aggregate OCR engine diagnostic statistics.
+#[tauri::command]
+pub fn get_ocr_engine_stats(
+    db: State<'_, Database>,
+    router: State<'_, std::sync::Arc<crate::ocr::router::OcrEngineRouter>>,
+) -> CommandResult<screenshots::OcrEngineStats> {
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
+
+    let diagnostics = router.get_diagnostics();
+    let target_pipeline = if diagnostics.is_multilingual_ready {
+        "multilingual_ocr:ppocr_v4"
+    } else {
+        "windows_media_ocr:winrt_v1"
+    };
+
+    screenshots::get_ocr_engine_stats(&conn, target_pipeline)
+}
+
+/// Returns the count of screenshots eligible for re-OCR with an improved engine.
+#[tauri::command]
+pub fn get_re_ocr_eligible_count(
+    db: State<'_, Database>,
+    router: State<'_, std::sync::Arc<crate::ocr::router::OcrEngineRouter>>,
+) -> CommandResult<usize> {
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
+
+    let diagnostics = router.get_diagnostics();
+    let target_pipeline = if diagnostics.is_multilingual_ready {
+        "multilingual_ocr:ppocr_v4"
+    } else {
+        "windows_media_ocr:winrt_v1"
+    };
+
+    screenshots::get_re_ocr_eligible_count(&conn, target_pipeline)
+}
+
+/// Enqueues eligible screenshots for background re-OCR with the improved OCR engine.
+#[tauri::command]
+pub fn reprocess_screenshots_with_improved_ocr(
+    db: State<'_, Database>,
+    router: State<'_, std::sync::Arc<crate::ocr::router::OcrEngineRouter>>,
+    limit: Option<usize>,
+) -> CommandResult<usize> {
+    let conn = db
+        .conn
+        .lock()
+        .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
+
+    let diagnostics = router.get_diagnostics();
+    let target_pipeline = match diagnostics.mode {
+        crate::ocr::engine::OcrEngineMode::Windows => "windows_media_ocr:winrt_v1".to_string(),
+        crate::ocr::engine::OcrEngineMode::Multilingual => "multilingual_ocr:ppocr_v4".to_string(),
+        crate::ocr::engine::OcrEngineMode::Auto => {
+            if diagnostics.is_multilingual_ready {
+                "multilingual_ocr:ppocr_v4".to_string()
+            } else {
+                "windows_media_ocr:winrt_v1".to_string()
+            }
+        }
+    };
+
+    let eligible = screenshots::get_re_ocr_eligible_screenshots(
+        &conn,
+        &target_pipeline,
+        limit.unwrap_or(10_000),
+    )?;
+    let mut enqueued = 0;
+
+    for item in eligible {
+        let content_hash = screenshots::get_screenshot_by_id(&conn, item.id)?
+            .and_then(|d| d.content_hash)
+            .unwrap_or_default();
+
+        let dedupe_key =
+            crate::db::jobs::build_re_ocr_dedupe_key(item.id, &content_hash, &target_pipeline);
+        if let Ok(Some(_)) = crate::db::jobs::enqueue_re_ocr_job(
+            &conn,
+            item.folder_id,
+            item.id,
+            &item.path,
+            &dedupe_key,
+        ) {
+            enqueued += 1;
+        }
+    }
+
+    log::info!("Enqueued {enqueued} screenshots for re-OCR with target pipeline {target_pipeline}");
+    Ok(enqueued)
+}

@@ -98,6 +98,16 @@ const MIGRATIONS: &[Migration] = &[
                 ON screenshot_embeddings(model_id, model_version);
         ",
     },
+    Migration {
+        version: 5,
+        sql: "
+            ALTER TABLE screenshots ADD COLUMN ocr_engine_version TEXT;
+            ALTER TABLE screenshots ADD COLUMN ocr_language TEXT;
+            ALTER TABLE screenshots ADD COLUMN ocr_pipeline_version TEXT DEFAULT 'v1';
+            CREATE INDEX IF NOT EXISTS idx_screenshots_ocr_pipeline_version 
+                ON screenshots(ocr_pipeline_version);
+        ",
+    },
 ];
 
 /// Backfills existing SUCCEEDED screenshots into the FTS5 index upon migration to v2.

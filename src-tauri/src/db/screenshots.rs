@@ -262,6 +262,9 @@ pub struct ScreenshotDetail {
     pub ocr_text: Option<String>,
     pub ocr_status: String,
     pub ocr_engine: Option<String>,
+    pub ocr_engine_version: Option<String>,
+    pub ocr_language: Option<String>,
+    pub ocr_pipeline_version: Option<String>,
     pub indexed_at: Option<String>,
 }
 
@@ -274,6 +277,17 @@ pub struct SearchIndexHealth {
     pub is_healthy: bool,
 }
 
+/// OCR engine statistics for health diagnostics and re-processing metrics.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrEngineStats {
+    pub total_succeeded: usize,
+    pub windows_count: usize,
+    pub multilingual_count: usize,
+    pub outdated_pipeline_count: usize,
+    pub failed_count: usize,
+}
+
 /// Persists successful OCR text and updates status to `SUCCEEDED`.
 /// Synchronizes the normalized search representation to SQLite FTS5 index.
 pub fn save_ocr_success(
@@ -282,15 +296,38 @@ pub fn save_ocr_success(
     ocr_text: &str,
     ocr_engine: &str,
 ) -> Result<(), AppError> {
+    save_ocr_success_with_metadata(conn, id, ocr_text, ocr_engine, None, None, Some("v1"))
+}
+
+/// Persists successful OCR text with extended engine version, language, and pipeline metadata.
+pub fn save_ocr_success_with_metadata(
+    conn: &Connection,
+    id: i64,
+    ocr_text: &str,
+    ocr_engine: &str,
+    ocr_engine_version: Option<&str>,
+    ocr_language: Option<&str>,
+    ocr_pipeline_version: Option<&str>,
+) -> Result<(), AppError> {
     conn.execute(
         "UPDATE screenshots 
          SET ocr_status = 'SUCCEEDED', 
              ocr_text = ?1, 
              ocr_engine = ?2, 
+             ocr_engine_version = ?3,
+             ocr_language = ?4,
+             ocr_pipeline_version = ?5,
              indexed_at = datetime('now'), 
              updated_at = datetime('now') 
-         WHERE id = ?3",
-        params![ocr_text, ocr_engine, id],
+         WHERE id = ?6",
+        params![
+            ocr_text,
+            ocr_engine,
+            ocr_engine_version,
+            ocr_language,
+            ocr_pipeline_version,
+            id
+        ],
     )
     .map_err(|e| AppError::database(format!("Failed to save OCR success: {e}")))?;
 
@@ -304,6 +341,176 @@ pub fn save_ocr_success(
     .map_err(|e| AppError::database(format!("Failed to sync FTS on OCR success: {e}")))?;
 
     Ok(())
+}
+
+/// Atomically replaces OCR text and FTS5 search index, invalidating stale semantic embeddings.
+/// If any step fails, the existing OCR and FTS data remain untouched.
+pub fn replace_ocr_atomically(
+    conn: &Connection,
+    id: i64,
+    ocr_text: &str,
+    ocr_engine: &str,
+    ocr_engine_version: Option<&str>,
+    ocr_language: Option<&str>,
+    ocr_pipeline_version: &str,
+) -> Result<(), AppError> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::database(format!("Failed to start transaction: {e}")))?;
+
+    // 1. Update screenshot record
+    tx.execute(
+        "UPDATE screenshots 
+         SET ocr_status = 'SUCCEEDED', 
+             ocr_text = ?1, 
+             ocr_engine = ?2, 
+             ocr_engine_version = ?3,
+             ocr_language = ?4,
+             ocr_pipeline_version = ?5,
+             indexed_at = datetime('now'), 
+             updated_at = datetime('now') 
+         WHERE id = ?6",
+        params![
+            ocr_text,
+            ocr_engine,
+            ocr_engine_version,
+            ocr_language,
+            ocr_pipeline_version,
+            id
+        ],
+    )
+    .map_err(|e| AppError::database(format!("Failed to update screenshot for re-OCR: {e}")))?;
+
+    // 2. Synchronize to FTS5 index
+    let search_text = crate::search::normalize::normalize_search_text(ocr_text);
+    tx.execute(
+        "INSERT OR REPLACE INTO screenshots_fts (rowid, filename, ocr_search_text)
+         SELECT id, filename, ?2 FROM screenshots WHERE id = ?1",
+        params![id, search_text],
+    )
+    .map_err(|e| AppError::database(format!("Failed to sync FTS on re-OCR: {e}")))?;
+
+    // 3. Invalidate/delete stale Phase 3 semantic embedding so it will be regenerated
+    tx.execute(
+        "DELETE FROM screenshot_embeddings WHERE screenshot_id = ?1",
+        params![id],
+    )
+    .map_err(|e| AppError::database(format!("Failed to invalidate stale embedding: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| AppError::database(format!("Failed to commit re-OCR atomic update: {e}")))?;
+    Ok(())
+}
+
+/// Retrieves the count of screenshots eligible for re-OCR against a target pipeline version.
+pub fn get_re_ocr_eligible_count(
+    conn: &Connection,
+    target_pipeline_version: &str,
+) -> Result<usize, AppError> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM screenshots 
+             WHERE ocr_status = 'SUCCEEDED' 
+               AND (ocr_pipeline_version IS NULL OR ocr_pipeline_version != ?1)",
+            params![target_pipeline_version],
+            |row| row.get(0),
+        )
+        .map_err(|e| {
+            AppError::database(format!("Failed to count re-OCR eligible screenshots: {e}"))
+        })?;
+
+    Ok(count as usize)
+}
+
+/// Queries screenshots eligible for re-OCR up to `limit`.
+pub fn get_re_ocr_eligible_screenshots(
+    conn: &Connection,
+    target_pipeline_version: &str,
+    limit: usize,
+) -> Result<Vec<PendingScreenshotItem>, AppError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, folder_id, path, filename, extension
+             FROM screenshots
+             WHERE ocr_status = 'SUCCEEDED'
+               AND (ocr_pipeline_version IS NULL OR ocr_pipeline_version != ?1)
+             ORDER BY id ASC
+             LIMIT ?2",
+        )
+        .map_err(|e| AppError::database(format!("Failed to prepare re-OCR query: {e}")))?;
+
+    let rows = stmt
+        .query_map(params![target_pipeline_version, limit as i64], |row| {
+            Ok(PendingScreenshotItem {
+                id: row.get(0)?,
+                folder_id: row.get(1)?,
+                path: row.get(2)?,
+                filename: row.get(3)?,
+                extension: row.get(4)?,
+            })
+        })
+        .map_err(|e| AppError::database(format!("Failed to execute re-OCR query: {e}")))?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row.map_err(|e| AppError::database(format!("Failed to read item: {e}")))?)
+    }
+
+    Ok(items)
+}
+
+/// Retrieves aggregate OCR engine diagnostic counts.
+pub fn get_ocr_engine_stats(
+    conn: &Connection,
+    target_pipeline_version: &str,
+) -> Result<OcrEngineStats, AppError> {
+    let total_succeeded: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM screenshots WHERE ocr_status = 'SUCCEEDED'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    let windows_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM screenshots WHERE ocr_status = 'SUCCEEDED' AND ocr_engine LIKE '%windows%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    let multilingual_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM screenshots WHERE ocr_status = 'SUCCEEDED' AND ocr_engine LIKE '%multilingual%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    let outdated_pipeline_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM screenshots WHERE ocr_status = 'SUCCEEDED' AND (ocr_pipeline_version IS NULL OR ocr_pipeline_version != ?1)",
+            params![target_pipeline_version],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    let failed_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM screenshots WHERE ocr_status = 'FAILED'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    Ok(OcrEngineStats {
+        total_succeeded: total_succeeded as usize,
+        windows_count: windows_count as usize,
+        multilingual_count: multilingual_count as usize,
+        outdated_pipeline_count: outdated_pipeline_count as usize,
+        failed_count: failed_count as usize,
+    })
 }
 
 /// Marks a screenshot as `FAILED` if OCR recognition fails.
@@ -343,7 +550,10 @@ fn map_screenshot_detail_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Screen
         ocr_text: row.get(10)?,
         ocr_status: row.get(11)?,
         ocr_engine: row.get(12)?,
-        indexed_at: row.get(13)?,
+        ocr_engine_version: row.get(13)?,
+        ocr_language: row.get(14)?,
+        ocr_pipeline_version: row.get(15)?,
+        indexed_at: row.get(16)?,
     })
 }
 
@@ -356,7 +566,8 @@ pub fn get_screenshot_by_id(
         .prepare(
             "SELECT 
                 id, folder_id, path, filename, extension, file_size, modified_at_fs,
-                content_hash, width, height, ocr_text, ocr_status, ocr_engine, indexed_at
+                content_hash, width, height, ocr_text, ocr_status, ocr_engine,
+                ocr_engine_version, ocr_language, ocr_pipeline_version, indexed_at
              FROM screenshots 
              WHERE id = ?1",
         )
@@ -384,7 +595,8 @@ pub fn get_screenshot_by_path(
         .prepare(
             "SELECT 
                 id, folder_id, path, filename, extension, file_size, modified_at_fs,
-                content_hash, width, height, ocr_text, ocr_status, ocr_engine, indexed_at
+                content_hash, width, height, ocr_text, ocr_status, ocr_engine,
+                ocr_engine_version, ocr_language, ocr_pipeline_version, indexed_at
              FROM screenshots 
              WHERE path = ?1",
         )

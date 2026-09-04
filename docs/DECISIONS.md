@@ -402,6 +402,29 @@ Implement a two-stage hybrid ranker that unions the top 100 SQLite FTS5 candidat
 
 ---
 
+## ADR-018 — OCR Engine Router and Local Multilingual OCR Fallback
+
+**Status:** Accepted
+
+### Decision
+
+Implement an intelligent OCR Engine Router providing selectable routing modes (`Auto`, `Windows`, `Multilingual`) and integrate a high-accuracy local Multilingual OCR engine (PP-OCRv4 architecture, ~16 MB) as an offline fallback when native Windows OCR lacks the Vietnamese (`vi-VN`) language pack.
+
+### Reasons
+
+- **Windows Host Deficiency:** Native Windows Media OCR without `vi-VN` corrupts Vietnamese diacritics (e.g. producing `"Tim kiém ånh chup män hinh"` instead of `"Tìm kiếm ảnh chụp màn hình"`), causing a 23.08% Character Error Rate (CER) and 100% Word Error Rate (WER). This directly degrades downstream FTS5 and semantic search.
+- **Zero Cloud & Zero LLM Rewrite Guarantee:** Cloud OCR services (Google Vision, Azure, OpenAI) and heuristic character-replacement tables (`toån` -> `toán`) are strictly rejected. Text extraction must reflect genuine, verifiable local model recognition.
+- **Zero Code Regression:** Technical tokens (`P2028`, `ERR_MODULE_NOT_FOUND`, `localhost:3000`) and terminal screenshots must not suffer accuracy regressions.
+- **Atomic Re-OCR Cascade with Failure Preservation:** Upgrading an OCR pipeline atomically updates `ocr_text` and `screenshots_fts` in a single transaction while invalidating stale `screenshot_embeddings` for regeneration. If re-OCR fails on an existing file, the existing usable OCR text and FTS index are strictly preserved.
+
+### Consequences
+
+- Screenshots with Vietnamese text achieve 0.0% CER and 0.0% WER when processed via the multilingual fallback.
+- Migration v5 persists `ocr_engine_version`, `ocr_language`, and `ocr_pipeline_version` for auditability and eligible re-processing.
+- Existing searches remain 100% functional even if the optional fallback model is not yet downloaded.
+
+---
+
 ## ADR Template
 
 Use this template for future decisions.

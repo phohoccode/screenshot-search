@@ -32,6 +32,8 @@ sha2 = "0.10"
 unicode-normalization = "0.1"
 notify = "7"
 fastembed = { version = "6", default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+ort = "2.0.0-rc.13"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

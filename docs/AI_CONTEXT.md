@@ -300,7 +300,19 @@ Do not make GPU availability a hard requirement.
 
 ---
 
-## 14. AI Scope Guard
+## 14. Local Multilingual OCR Fallback (Phase 3.5)
+
+To prevent OCR degradation on hosts where the Windows native Vietnamese (`vi-VN`) language pack is not installed, the application integrates a local Multilingual OCR fallback:
+
+- **Model Architecture:** PP-OCRv4 (compact detection & recognition ONNX models, ~16 MB total download).
+- **Execution:** 100% in-process CPU execution via ONNX Runtime.
+- **Vietnamese Character Set:** Full transcription of Vietnamese vowels with composite tone marks (`á`, `à`, `ả`, `ã`, `ạ`, `ă`, `ắ`, `ằ`, `ẳ`, `ẵ`, `ặ`, `â`, `ấ`, `ầ`, `ẩ`, `ẫ`, `ậ`, `é`, `è`, `ẻ`, `ẽ`, `ẹ`, `ê`, `ế`, `ề`, `ể`, `ễ`, `ệ`, `í`, `ì`, `ỉ`, `ĩ`, `ị`, `ó`, `ò`, `ỏ`, `õ`, `ọ`, `ô`, `ố`, `ồ`, `ổ`, `ỗ`, `ộ`, `ơ`, `ớ`, `ờ`, `ở`, `ỡ`, `ợ`, `ú`, `ù`, `ủ`, `ũ`, `ụ`, `ư`, `ứ`, `ừ`, `ử`, `ữ`, `ự`, `ý`, `ỳ`, `ỷ`, `ỹ`, `ỵ`, `đ`) plus Latin alphabet and technical symbols.
+- **Zero Cloud & Zero LLM Rewrite:** No external API requests, no heuristic replacement tables (`toån` -> `toán`).
+- **Coexistence:** Runs alongside Phase 3 `multilingual-e5-small` text embeddings with zero dependency conflicts.
+
+---
+
+## 15. AI Scope Guard
 
 Before adding a new AI feature, answer:
 

@@ -44,6 +44,28 @@ Persistence
 SQLite + FTS5
 ```
 
+Phase 3.5 OCR Engine Router Architecture:
+
+```text
+Screenshot File
+   │
+   ▼
+OcrEngineRouter (Auto / Windows / Multilingual)
+   │
+   ├── [Auto / Windows] ──────► WindowsMediaOcrEngine (WinRT native)
+   │                             └── Fast native OCR (prioritized if vi-VN supported)
+   │
+   └── [Auto / Multilingual] ──► MultilingualOcrEngine (Local PP-OCRv4 ONNX)
+                                 └── High-accuracy Vietnamese & diacritics (~16 MB)
+   │
+   ▼
+Normalized OCR Output
+   │
+   ├──► SQLite `screenshots` (ocr_text, ocr_engine, ocr_pipeline_version)
+   ├──► SQLite FTS5 `screenshots_fts` (atomic sync)
+   └──► Stale Vector Invalidation ──► `GENERATE_TEXT_EMBEDDING` (Phase 3 refresh)
+```
+
 Phase 3 Hybrid Search Architecture:
 
 ```text

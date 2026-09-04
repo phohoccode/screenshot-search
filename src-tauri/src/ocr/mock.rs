@@ -54,6 +54,7 @@ impl OcrEngine for MockOcrEngine {
                 text: String::new(),
                 engine: self.name().to_string(),
                 engine_version: self.version().to_string(),
+                language: Some("mock".to_string()),
                 confidence: Some(1.0),
             });
         }
@@ -65,6 +66,7 @@ impl OcrEngine for MockOcrEngine {
             text: normalized,
             engine: self.name().to_string(),
             engine_version: self.version().to_string(),
+            language: Some("mock".to_string()),
             confidence: Some(0.95),
         })
     }

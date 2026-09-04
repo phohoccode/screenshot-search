@@ -31,9 +31,25 @@ impl WindowsMediaOcrEngine {
                 })
                 .unwrap_or_default();
 
+            let vi_lang = windows::Globalization::Language::CreateLanguage(
+                &windows::core::HSTRING::from("vi-VN"),
+            )
+            .or_else(|_| {
+                windows::Globalization::Language::CreateLanguage(&windows::core::HSTRING::from(
+                    "vi",
+                ))
+            });
+
+            let vi_supported = if let Ok(ref lang) = vi_lang {
+                WinRtOcrEngine::IsLanguageSupported(lang).unwrap_or(false)
+            } else {
+                false
+            };
+
             let supports_vietnamese = available_langs
                 .iter()
-                .any(|tag| tag.eq_ignore_ascii_case("vi") || tag.to_lowercase().starts_with("vi-"));
+                .any(|tag| tag.eq_ignore_ascii_case("vi") || tag.to_lowercase().starts_with("vi-"))
+                || vi_supported;
 
             match WinRtOcrEngine::TryCreateFromUserProfileLanguages() {
                 Ok(engine) => {
@@ -480,6 +496,7 @@ impl OcrEngine for WindowsMediaOcrEngine {
             text: normalized,
             engine: self.name().to_string(),
             engine_version: self.version().to_string(),
+            language: Some(self.info.active_language.clone()),
             confidence: None,
         })
     }

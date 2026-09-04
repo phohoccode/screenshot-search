@@ -15,6 +15,9 @@ import type {
   IndexingJobCompletedPayload,
   SemanticModelInfo,
   EmbeddingStats,
+  OcrEngineDiagnostics,
+  OcrEngineMode,
+  OcrEngineStats,
   AppError,
 } from "@/types";
 
@@ -537,4 +540,91 @@ export async function onSemanticModelReady(
   }
   return () => {};
 }
+
+/** Retrieves OCR router diagnostics including Windows language packs and multilingual fallback status */
+export async function getOcrEngineDiagnostics(): Promise<OcrEngineDiagnostics> {
+  if (isTauri()) {
+    return await invoke<OcrEngineDiagnostics>("get_ocr_engine_diagnostics");
+  }
+  return {
+    mode: "Auto",
+    activeEngineName: "windows_media_ocr",
+    windowsInfo: {
+      engineName: "windows_media_ocr",
+      engineVersion: "winrt_v1",
+      activeLanguage: "en-US",
+      availableLanguages: ["en-US"],
+      supportsVietnamese: false,
+      maxImageDimension: 2600,
+    },
+    multilingualInfo: {
+      modelId: "multilingual-ocr",
+      modelVersion: "ppocr_v4",
+      status: { status: "notInstalled" },
+      isAvailable: false,
+      approximateSizeMb: 16,
+    },
+    windowsSupportsVietnamese: false,
+    isMultilingualReady: false,
+  };
+}
+
+/** Sets the active OCR Engine Router mode */
+export async function setOcrEngineMode(mode: OcrEngineMode): Promise<void> {
+  if (isTauri()) {
+    await invoke("set_ocr_engine_mode", { mode });
+  }
+}
+
+/** Triggers background download of the local multilingual OCR model */
+export async function downloadMultilingualOcrModel(): Promise<void> {
+  if (isTauri()) {
+    await invoke("download_multilingual_ocr_model");
+  }
+}
+
+/** Retrieves aggregate OCR engine diagnostic statistics */
+export async function getOcrEngineStats(): Promise<OcrEngineStats> {
+  if (isTauri()) {
+    return await invoke<OcrEngineStats>("get_ocr_engine_stats");
+  }
+  return {
+    totalSucceeded: 3,
+    windowsCount: 3,
+    multilingualCount: 0,
+    outdatedPipelineCount: 0,
+    failedCount: 0,
+  };
+}
+
+/** Returns the count of screenshots eligible for re-OCR with an improved engine */
+export async function getReOcrEligibleCount(): Promise<number> {
+  if (isTauri()) {
+    return await invoke<number>("get_re_ocr_eligible_count");
+  }
+  return 0;
+}
+
+/** Enqueues screenshots for background re-OCR with the improved OCR engine */
+export async function reprocessScreenshotsWithImprovedOcr(
+  limit?: number
+): Promise<number> {
+  if (isTauri()) {
+    return await invoke<number>("reprocess_screenshots_with_improved_ocr", {
+      limit,
+    });
+  }
+  return 0;
+}
+
+/** Subscribes to events when the multilingual OCR model download status updates */
+export async function onOcrModelStatusChanged(
+  callback: () => void
+): Promise<UnlistenFn> {
+  if (isTauri()) {
+    return await listen("ocr_model_status_changed", () => callback());
+  }
+  return () => {};
+}
+
 
