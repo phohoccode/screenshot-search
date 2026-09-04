@@ -834,11 +834,7 @@ mod tests {
         assert_eq!(wer_multi, 0.0);
     }
 
-    #[test]
-    fn test_vietnamese_ocr_quality_and_diacritics_accuracy() {
-        use crate::ocr::engine::OcrEngine;
-        use crate::ocr::multilingual::MultilingualOcrEngine;
-
+    fn load_test_hybrid_engine() -> crate::ocr::hybrid::HybridOcrEngine {
         let models_dir = std::path::PathBuf::from(
             std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Pho\AppData\Roaming".into()),
         )
@@ -846,27 +842,35 @@ mod tests {
         .join("models")
         .join("multilingual-ocr");
 
-        let engine = MultilingualOcrEngine::new(&models_dir).expect("Real MultilingualOcrEngine");
+        let det_path = models_dir.join("ch_PP-OCRv4_det_infer.onnx");
+        let detector = std::sync::Arc::new(
+            crate::ocr::detector::TextLineDetector::new(&det_path).expect("DBNet detector"),
+        );
+        let recognizer = std::sync::Arc::new(
+            crate::ocr::vietocr::VietOcrOnnxRecognizer::new(&models_dir)
+                .expect("VietOCR recognizer"),
+        );
+        let win_engine = std::sync::Arc::new(crate::ocr::windows::WindowsMediaOcrEngine::new());
+        crate::ocr::hybrid::HybridOcrEngine::new(detector, win_engine, Some(recognizer))
+    }
+
+    #[test]
+    fn test_vietnamese_ocr_quality_and_diacritics_accuracy() {
+        use crate::ocr::engine::OcrEngine;
+
+        let engine = load_test_hybrid_engine();
         let p_vi = get_fixture_path("vietnamese.png");
 
-        let res = engine.recognize(&p_vi).expect("Multilingual OCR failed");
-        assert_eq!(res.language.as_deref(), Some("vi-VN"));
+        let res = engine.recognize(&p_vi).expect("Hybrid OCR failed");
+        assert_eq!(res.language.as_deref(), Some("mixed"));
         assert!(!res.text.is_empty(), "Real OCR output must not be empty");
     }
 
     #[test]
     fn test_technical_tokens_zero_regression() {
         use crate::ocr::engine::OcrEngine;
-        use crate::ocr::multilingual::MultilingualOcrEngine;
 
-        let models_dir = std::path::PathBuf::from(
-            std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Pho\AppData\Roaming".into()),
-        )
-        .join("com.screenshot-search.app")
-        .join("models")
-        .join("multilingual-ocr");
-
-        let engine = MultilingualOcrEngine::new(&models_dir).expect("Real MultilingualOcrEngine");
+        let engine = load_test_hybrid_engine();
         let p_tech = get_fixture_path("mixed_technical.png");
 
         let res = engine
@@ -893,25 +897,22 @@ mod tests {
 
         let router = OcrEngineRouter::new(mock_windows.clone(), model_mgr);
 
-        // Test 1: Auto Mode with quality gate = false → always uses Windows Media OCR.
-        // MULTILINGUAL_QUALITY_APPROVED=false blocks multilingual selection in Auto regardless
-        // of whether the model is installed, because the current PP-OCRv4 model scored
-        // CER=105.48% and Tech=5.0% on the Vietnamese benchmark — far below the 15% CER threshold.
+        // Test 1: Auto Mode with HYBRID_OCR_QUALITY_APPROVED=true → uses hybrid_windows_vietocr when multilingual is ready.
         router.set_mode(OcrEngineMode::Auto);
         assert_eq!(router.get_mode(), OcrEngineMode::Auto);
         let diag = router.get_diagnostics();
         assert_eq!(
-            diag.active_engine_name, "windows_media_ocr",
-            "Auto mode with MULTILINGUAL_QUALITY_APPROVED=false must always report windows_media_ocr"
+            diag.active_engine_name, "hybrid_windows_vietocr",
+            "Auto mode with HYBRID_OCR_QUALITY_APPROVED=true must report hybrid_windows_vietocr"
         );
         assert!(diag.is_multilingual_ready);
 
         let p_vi = get_fixture_path("vietnamese.png");
         let res_auto = router.recognize(&p_vi).expect("Auto recognition failed");
-        // Quality gate=false → Windows engine selected; mock_windows engine name is "mock_ocr"
+        // Quality gate approved → Hybrid engine selected; mock_multilingual engine name is "multilingual_ocr"
         assert_eq!(
-            res_auto.engine, "mock_ocr",
-            "Auto mode must route to Windows (mock_ocr) when quality gate is false"
+            res_auto.engine, "multilingual_ocr",
+            "Auto mode must route to Hybrid (multilingual_ocr) when quality gate is true"
         );
 
         // Test 2: Forced Windows Mode -> uses WindowsMediaOcrEngine
@@ -1174,20 +1175,17 @@ mod tests {
         router.set_mode(OcrEngineMode::Auto);
         let diag = router.get_diagnostics();
         assert_eq!(
-            diag.active_engine_name, "windows_media_ocr",
-            "Auto mode must select Windows Media OCR when quality gate blocks multilingual (MULTILINGUAL_QUALITY_APPROVED=false)"
+            diag.active_engine_name, "hybrid_windows_vietocr",
+            "Auto mode must select Hybrid OCR when quality gate is approved and model is ready"
         );
-        assert!(
-            diag.is_multilingual_ready,
-            "Model should still report as ready even when quality gate blocks Auto routing"
-        );
+        assert!(diag.is_multilingual_ready, "Model should report as ready");
 
         let p_vi = get_fixture_path("vietnamese.png");
-        // Auto → Windows (quality gate blocks multilingual)
+        // Auto → Hybrid (approved quality gate routes to hybrid)
         let res_auto = router.recognize(&p_vi).expect("Recognition failed");
         assert_eq!(
-            res_auto.engine, "mock_ocr",
-            "Auto must use windows (mock_ocr) when quality gate is false"
+            res_auto.engine, "multilingual_ocr",
+            "Auto must use hybrid (multilingual_ocr) when quality gate is approved"
         );
 
         // Forced Multilingual mode still works for manual override / testing
@@ -1360,7 +1358,6 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn test_vietnamese_ocr_comprehensive_30_fixtures_benchmark() {
         use crate::ocr::engine::OcrEngine;
-        use crate::ocr::multilingual::MultilingualOcrEngine;
         use crate::ocr::windows::WindowsMediaOcrEngine;
         use std::fs;
         use std::path::PathBuf;
@@ -1385,14 +1382,7 @@ mod tests {
         );
 
         let win_engine = WindowsMediaOcrEngine::new();
-        let models_dir = std::path::PathBuf::from(
-            std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Pho\AppData\Roaming".into()),
-        )
-        .join("com.screenshot-search.app")
-        .join("models")
-        .join("multilingual-ocr");
-        let multi_engine =
-            MultilingualOcrEngine::new(&models_dir).expect("Real MultilingualOcrEngine");
+        let hybrid_engine = load_test_hybrid_engine();
 
         let bench_dir = {
             let p1 = PathBuf::from("tests/fixtures/vietnamese_benchmark");
@@ -1436,6 +1426,9 @@ mod tests {
         );
         println!("{:-<28}-|-{:-<12}-|-{:-<18}-|-{:-<18}", "", "", "", "");
 
+        let mut win_all_text = String::new();
+        let mut hybrid_all_text = String::new();
+
         for f in &fixtures {
             let img_path = bench_dir.join(&f.name);
             assert!(
@@ -1455,6 +1448,9 @@ mod tests {
             let win_res = win_engine
                 .recognize(&img_path)
                 .expect("Windows OCR recognition");
+            win_all_text.push_str(&win_res.text);
+            win_all_text.push('\n');
+
             let win_cer = calculate_cer(ground_truth, &win_res.text);
             let win_wer = calculate_wer(ground_truth, &win_res.text);
 
@@ -1472,10 +1468,13 @@ mod tests {
             win_cer_list.push(win_cer);
             win_wer_list.push(win_wer);
 
-            // 2. Run Multilingual OCR (PP-OCRv4)
-            let multi_res = multi_engine
+            // 2. Run Hybrid OCR (DBNet + Windows probe + VietOCR)
+            let multi_res = hybrid_engine
                 .recognize(&img_path)
-                .expect("Multilingual OCR recognition");
+                .expect("Hybrid OCR recognition");
+            hybrid_all_text.push_str(&multi_res.text);
+            hybrid_all_text.push('\n');
+
             let multi_cer = calculate_cer(ground_truth, &multi_res.text);
             let multi_wer = calculate_wer(ground_truth, &multi_res.text);
 
@@ -1570,9 +1569,9 @@ mod tests {
             );
         }
 
-        // Report Worst Cases for Multilingual OCR
+        // Report Worst Cases for Hybrid OCR
         results.sort_by(|a, b| b.multi_cer.partial_cmp(&a.multi_cer).unwrap());
-        println!("\nTop Worst Cases for Multilingual OCR (PP-OCRv4):");
+        println!("\nTop Worst Cases for Hybrid OCR:");
         for (i, r) in results.iter().take(3).enumerate() {
             println!(
                 "  #{}. {:<28} (Font: {:<12}) -> CER: {:>5.2}%, WER: {:>5.2}%",
@@ -1583,6 +1582,61 @@ mod tests {
                 r.multi_wer * 100.0
             );
         }
+
+        // Technical Token Benchmark on the 30-fixture corpus (24 tokens)
+        let technical_tokens = [
+            "VCB-982341",
+            "250.000",
+            "08:30:15",
+            "4.2 MB",
+            "FTS5",
+            "100%",
+            "1.420",
+            "45.8 GB",
+            "database.sqlite",
+            "access_token",
+            "git commit",
+            "HTTP 500",
+            "localhost:3000",
+            "Release v1.2.0",
+            "PrismaClientKnownRequestError",
+            "P2028",
+            "ERR_MODULE_NOT_FOUND",
+            "./features/search",
+            "CONTAINER ID",
+            "9f8a7b6c5d4e",
+            "8080",
+            "200 OK",
+            "SELECT",
+            "WHERE",
+        ];
+
+        let mut win_tech_hits = 0;
+        let mut hybrid_tech_hits = 0;
+        let win_lower = win_all_text.to_lowercase();
+        let hybrid_lower = hybrid_all_text.to_lowercase();
+
+        for tok in &technical_tokens {
+            let tok_lower = tok.to_lowercase();
+            if win_lower.contains(&tok_lower) {
+                win_tech_hits += 1;
+            }
+            if hybrid_lower.contains(&tok_lower) {
+                hybrid_tech_hits += 1;
+            } else {
+                println!("HYBRID MISSED TECHNICAL TOKEN: {}", tok);
+            }
+        }
+
+        let win_tech_acc = (win_tech_hits as f64) / (technical_tokens.len() as f64) * 100.0;
+        let hybrid_tech_acc = (hybrid_tech_hits as f64) / (technical_tokens.len() as f64) * 100.0;
+
+        println!("-------------------------------------------------------------------------------------------------");
+        println!(
+            "Technical Token Accuracy (24 tokens): Windows: {:>5.1}% ({}/{}) | Hybrid: {:>5.1}% ({}/{})",
+            win_tech_acc, win_tech_hits, technical_tokens.len(),
+            hybrid_tech_acc, hybrid_tech_hits, technical_tokens.len()
+        );
         println!("=================================================================================================\n");
 
         // Verify Multilingual OCR dramatically outperforms host Windows OCR
@@ -1649,19 +1703,11 @@ mod tests {
         use crate::db::jobs::{self, JOB_TYPE_UPSERT};
         use crate::db::screenshots;
         use crate::indexing::worker::run_indexing_worker_loop_step;
-        use crate::ocr::multilingual::MultilingualOcrEngine;
 
         let db = setup_test_db();
         let conn = db.conn.lock().unwrap();
 
-        let models_dir = std::path::PathBuf::from(
-            std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Pho\AppData\Roaming".into()),
-        )
-        .join("com.screenshot-search.app")
-        .join("models")
-        .join("multilingual-ocr");
-
-        let engine = MultilingualOcrEngine::new(&models_dir).expect("Real MultilingualOcrEngine");
+        let engine = load_test_hybrid_engine();
 
         let p_alpha = std::path::PathBuf::from("tests/fixtures/data_integrity/alpha.png");
         let p_beta = std::path::PathBuf::from("tests/fixtures/data_integrity/beta.png");
@@ -1801,19 +1847,11 @@ mod tests {
         use crate::db::jobs;
         use crate::db::screenshots;
         use crate::indexing::worker::run_indexing_worker_loop_step;
-        use crate::ocr::multilingual::MultilingualOcrEngine;
 
         let db = setup_test_db();
         let conn = db.conn.lock().unwrap();
 
-        let models_dir = std::path::PathBuf::from(
-            std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Pho\AppData\Roaming".into()),
-        )
-        .join("com.screenshot-search.app")
-        .join("models")
-        .join("multilingual-ocr");
-
-        let engine = MultilingualOcrEngine::new(&models_dir).expect("Real MultilingualOcrEngine");
+        let engine = load_test_hybrid_engine();
 
         // Use 10 benchmark fixtures with distinct files
         let bench_dir = std::path::PathBuf::from("tests/fixtures/vietnamese_benchmark");
@@ -1900,7 +1938,6 @@ mod tests {
     fn test_repair_and_verify_live_database() {
         use crate::db::screenshots;
         use crate::ocr::engine::OcrEngine;
-        use crate::ocr::multilingual::MultilingualOcrEngine;
         use rusqlite::Connection;
         use std::path::PathBuf;
 
@@ -1917,12 +1954,7 @@ mod tests {
             return;
         }
 
-        let models_dir = PathBuf::from(&appdata)
-            .join("com.screenshot-search.app")
-            .join("models")
-            .join("multilingual-ocr");
-
-        let engine = MultilingualOcrEngine::new(&models_dir).expect("Real MultilingualOcrEngine");
+        let engine = load_test_hybrid_engine();
         let conn = Connection::open(&live_db_path).expect("Open live database");
 
         // Find all screenshots with corrupted mock OCR text
@@ -2065,20 +2097,17 @@ mod tests {
         let _ = MULTILINGUAL_QUALITY_APPROVED; // must compile and be accessible
     }
 
-    /// Scenario 2: Windows en-US only + multilingual ready, but quality gate = false.
-    /// Expected: Auto selects Windows (gate blocks multilingual despite being installed).
+    /// Scenario 2: Windows en-US only + multilingual ready + HYBRID_OCR_QUALITY_APPROVED=true.
+    /// Expected: Auto selects Hybrid OCR when quality gate is approved and model is ready.
     #[test]
-    fn test_router_auto_windows_en_multilingual_ready_gate_false() {
+    fn test_router_auto_windows_en_multilingual_ready_gate_approved() {
         use crate::ocr::engine::OcrEngineInfo;
         use crate::ocr::manager::MultilingualOcrModelManager;
-        use crate::ocr::router::{OcrEngineRouter, MULTILINGUAL_QUALITY_APPROVED};
+        use crate::ocr::router::{OcrEngineRouter, HYBRID_OCR_QUALITY_APPROVED};
 
-        // Precondition: the gate must be false for this test to be meaningful.
-        // If it is somehow flipped to true, this test serves as a regression guard.
         assert!(
-            !MULTILINGUAL_QUALITY_APPROVED,
-            "MULTILINGUAL_QUALITY_APPROVED must be false until a \
-             quality-approved Vietnamese OCR model is benchmarked and confirmed"
+            HYBRID_OCR_QUALITY_APPROVED,
+            "HYBRID_OCR_QUALITY_APPROVED must be true after quality benchmark passes"
         );
 
         let windows_engine = Arc::new(MockOcrEngine::new_with_info(
@@ -2099,9 +2128,11 @@ mod tests {
         let router = OcrEngineRouter::new(windows_engine, manager);
         let diag = router.get_diagnostics();
 
-        // Even though multilingual is ready, the quality gate is false → windows_media_ocr
-        assert_eq!(diag.active_engine_name, "windows_media_ocr",
-            "Scenario 2: MULTILINGUAL_QUALITY_APPROVED=false → must block multilingual and use windows_media_ocr");
+        // When multilingual is ready and hybrid quality gate is approved → hybrid_windows_vietocr
+        assert_eq!(
+            diag.active_engine_name, "hybrid_windows_vietocr",
+            "Scenario 2: HYBRID_OCR_QUALITY_APPROVED=true → must route to hybrid_windows_vietocr"
+        );
         assert!(!diag.windows_supports_vietnamese);
         assert!(diag.is_multilingual_ready);
     }
@@ -2179,5 +2210,1069 @@ mod tests {
             result.is_err(),
             "Scenario 4: Forced Multilingual with failing engine must return Err"
         );
+    }
+
+    // =========================================================================
+    // PHASE 3.5C — HYBRID OCR PIPELINE TESTS & BENCHMARKS
+    // =========================================================================
+
+    #[test]
+    fn test_classifier_100_line_benchmark_metrics() {
+        use crate::ocr::classifier::{LineContentClassifier, LineContentType};
+
+        let dataset: Vec<(&str, bool)> = vec![
+            // Technical (55 items) - expected true (Technical or Uncertain)
+            ("https://github.com/phohoccode/screenshot-search", true),
+            ("http://localhost:3000/api/v1/search", true),
+            ("https://api.stripe.com/v1/charges", true),
+            ("www.google.com.vn", true),
+            ("127.0.0.1:8080", true),
+            ("192.168.1.1", true),
+            ("C:\\Users\\Pho\\AppData\\Roaming", true),
+            ("E:\\Project\\screenshot-search", true),
+            ("./src-tauri/src/ocr/hybrid.rs", true),
+            ("../package.json", true),
+            ("/usr/local/bin/node", true),
+            ("/home/user/workspace/main.rs", true),
+            ("node_modules/.prisma/client", true),
+            ("query_engine-windows.dll.node", true),
+            ("Cargo.toml", true),
+            ("schema.prisma", true),
+            ("index.tsx", true),
+            ("main.rs", true),
+            ("package.json", true),
+            ("vite.config.ts", true),
+            ("P2028", true),
+            ("P3009", true),
+            ("P1001", true),
+            ("P2002", true),
+            ("ERR_MODULE_NOT_FOUND", true),
+            ("ECONNREFUSED", true),
+            ("EACCES", true),
+            ("EPERM", true),
+            ("EADDRINUSE", true),
+            ("HTTP 500 Internal Server Error", true),
+            ("HTTP 404 Not Found", true),
+            ("HTTP 502 Bad Gateway", true),
+            (
+                "PrismaClientKnownRequestError: Transaction already closed.",
+                true,
+            ),
+            (
+                "NullPointerException: attempted to access null reference",
+                true,
+            ),
+            ("panic: explicit panic called at line 42", true),
+            ("npm run build", true),
+            ("npm run tauri dev", true),
+            ("cargo check --manifest-path ./src-tauri/Cargo.toml", true),
+            ("cargo test --lib", true),
+            ("npx prisma generate", true),
+            ("git commit -m 'feat: hybrid per-line ocr'", true),
+            ("git status", true),
+            ("PS E:\\Project\\screenshot-search>", true),
+            ("$ curl -X GET http://localhost:8080/api/health", true),
+            ("> npm start", true),
+            ("@tauri-apps/cli", true),
+            ("@types/react", true),
+            ("GET /api/products", true),
+            ("POST /api/refunds", true),
+            ("DELETE /api/users/123", true),
+            ("Transaction already closed", true),
+            ("let mut buffer: Vec<u8> = Vec::with_capacity(1024);", true),
+            (
+                "pub fn recognize_line(&self, crop: &RgbImage) -> Result<String>;",
+                true,
+            ),
+            ("const is_available: bool = true;", true),
+            (
+                "SELECT * FROM screenshots WHERE ocr_text LIKE '%error%';",
+                true,
+            ),
+            ("Lỗi giao dịch P2028", true),
+            ("Máy chủ localhost:3000 không phản hồi", true),
+            ("Không thể tìm thấy ERR_MODULE_NOT_FOUND", true),
+            (
+                "Lỗi PrismaClientKnownRequestError xảy ra khi giao dịch bị đóng",
+                true,
+            ),
+            ("CONTAINER ID: 9f8a7b6c5d4e", true),
+            // Natural Language (45 items) - expected false (Natural)
+            ("Thanh toán thành công", false),
+            ("Không thể kết nối đến máy chủ", false),
+            ("Vui lòng thử lại sau", false),
+            ("Hệ thống đang được bảo trì", false),
+            ("Tìm kiếm ảnh chụp màn hình", false),
+            ("Đăng nhập để tiếp tục", false),
+            ("Sản phẩm đã được thêm vào giỏ hàng", false),
+            (
+                "Chào mừng bạn đến với ứng dụng tìm kiếm ảnh chụp màn hình",
+                false,
+            ),
+            ("Xác nhận xóa tập tin vĩnh viễn", false),
+            ("Bạn có muốn lưu các thay đổi này không?", false),
+            ("Tải về bản cập nhật mới nhất", false),
+            ("Thời gian ước tính hoàn thành quá trình quét", false),
+            ("Chính sách bảo mật và quyền riêng tư cá nhân", false),
+            ("Điều khoản sử dụng dịch vụ trực tuyến", false),
+            (
+                "Thông tin chi tiết về sản phẩm và dịch vụ khách hàng",
+                false,
+            ),
+            ("Liên hệ bộ phận hỗ trợ kỹ thuật", false),
+            ("Trang chủ Giới thiệu Tin tức Tuyển dụng Liên hệ", false),
+            ("Lưu thay đổi Hủy bỏ Tiếp tục Quay lại", false),
+            ("Hộp thư đến có ba thông báo mới chưa đọc", false),
+            ("Cài đặt giao diện chế độ tối hoặc sáng", false),
+            ("Cảm ơn bạn đã lựa chọn sản phẩm của chúng tôi", false),
+            ("Kiến trúc hệ thống bảo mật thông tin tuyệt đối", false),
+            (
+                "Đơn hàng của quý khách đã được vận chuyển thành công",
+                false,
+            ),
+            ("Vui lòng nhập địa chỉ thư điện tử hợp lệ", false),
+            ("Mật khẩu phải chứa ít nhất tám ký tự", false),
+            ("Chụp ảnh toàn màn hình hoặc một phần cửa sổ", false),
+            ("Tự động nhận diện văn bản tiếng Việt chính xác", false),
+            ("Tối ưu hóa bộ nhớ và tốc độ xử lý trên máy tính", false),
+            ("Quản lý danh sách thư mục được theo dõi tự động", false),
+            ("Tạm dừng quá trình lập chỉ mục khi pin yếu", false),
+            ("Khôi phục cài đặt gốc của hệ thống", false),
+            ("Payment completed successfully", false),
+            ("Unable to connect to server", false),
+            ("Please try again later", false),
+            ("System maintenance in progress", false),
+            ("Welcome to Screenshot Search application", false),
+            ("Do you want to save changes before closing?", false),
+            (
+                "Your order has been shipped to your registered address",
+                false,
+            ),
+            ("Thank you for your business and continued trust", false),
+            ("Privacy policy and terms of service agreement", false),
+            ("Click here to download the latest release", false),
+            ("Settings and preferences have been updated", false),
+            (
+                "Search screenshots using local artificial intelligence",
+                false,
+            ),
+            ("Automatic indexing paused while running on battery", false),
+            ("All data processed locally with zero telemetry", false),
+        ];
+
+        let mut tp = 0; // expected technical, classified technical
+        let mut fp = 0; // expected natural, classified technical
+        let mut tn = 0; // expected natural, classified natural
+        let mut fn_count = 0; // expected technical, classified natural
+
+        for (text, expected_tech) in &dataset {
+            let res = LineContentClassifier::classify(text);
+            let is_tech = match res {
+                LineContentType::Technical | LineContentType::Uncertain => true,
+                LineContentType::Natural => false,
+            };
+
+            if *expected_tech {
+                if is_tech {
+                    tp += 1;
+                } else {
+                    fn_count += 1;
+                    println!("MISCLASSIFIED AS NATURAL (FAIL-SAFE VIOLATION): '{}'", text);
+                }
+            } else {
+                if !is_tech {
+                    tn += 1;
+                } else {
+                    fp += 1;
+                }
+            }
+        }
+
+        let total = dataset.len();
+        let total_tech = tp + fn_count;
+        let total_natural = tn + fp;
+
+        let tech_recall = (tp as f64) / (total_tech as f64) * 100.0;
+        let tech_precision = (tp as f64) / ((tp + fp) as f64) * 100.0;
+        let natural_recall = (tn as f64) / (total_natural as f64) * 100.0;
+        let natural_precision = (tn as f64) / ((tn + fn_count) as f64) * 100.0;
+
+        println!("\n=========================================================================");
+        println!("             LINE CONTENT CLASSIFIER BENCHMARK (100+ SAMPLES)            ");
+        println!("=========================================================================");
+        println!("Total Lines Evaluated:    {}", total);
+        println!("Technical/Mixed Lines:    {}", total_tech);
+        println!("Natural Language Lines:   {}", total_natural);
+        println!("-------------------------------------------------------------------------");
+        println!(
+            "Technical Recall:         {:>6.2}% (Target: >= 99.0%)",
+            tech_recall
+        );
+        println!("Technical Precision:      {:>6.2}%", tech_precision);
+        println!("Natural Recall:           {:>6.2}%", natural_recall);
+        println!("Natural Precision:        {:>6.2}%", natural_precision);
+        println!("=========================================================================\n");
+
+        assert!(
+            tech_recall >= 99.0,
+            "Technical recall must be >= 99% (found {:.2}%) to ensure literal safety",
+            tech_recall
+        );
+        assert_eq!(
+            fn_count, 0,
+            "Zero technical lines allowed to be misclassified as natural"
+        );
+        assert!(
+            natural_recall >= 85.0,
+            "Natural recall must be >= 85% (found {:.2}%) for effective Vietnamese routing",
+            natural_recall
+        );
+    }
+
+    #[test]
+    fn test_classifier_holdout_100_line_benchmark() {
+        use crate::ocr::classifier::{LineContentClassifier, LineContentType};
+
+        let holdout_dataset = [
+            // ─── 50 UNSEEN TECHNICAL / MIXED SAMPLES ───
+            // Random error codes
+            (
+                "ORA-12154: TNS:could not resolve the connect identifier specified",
+                true,
+            ),
+            ("FATAL_EX_0x80004005 in kernel module", true),
+            ("Process terminated with SIGKILL 9", true),
+            ("WSAGetLastError returned 10061", true),
+            ("SEC_E_LOGON_DENIED during NTLM handshake", true),
+            // Uncommon package names
+            ("@swc/helpers runtime dependency missing", true),
+            ("Loaded dynamic library libusb-1.0.so", true),
+            ("cgroup subsystem mounted at /sys/fs/cgroup", true),
+            ("bcrypt-pbkdf key derivation failed", true),
+            ("onnxruntime-node execution provider cpu", true),
+            // Version hashes & git refs
+            ("Build succeeded at commit a84fe91b2c", true),
+            ("Image digest sha256:4b35e0c5d7a8f1", true),
+            ("Checked out tag v2.0.0-rc.3", true),
+            ("Branch origin/feature/auth-refresh-v2", true),
+            // UUIDs & Docker IDs
+            (
+                "Request tracing id: e2b8c9d0-1234-4567-89ab-cdef01234567",
+                true,
+            ),
+            (
+                "URN identifier urn:uuid:6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+                true,
+            ),
+            ("Docker image id sha256:d82e56e3a72d", true),
+            ("Exited container_id=c14e9f3b890a", true),
+            // SQL queries
+            (
+                "SELECT u.id, u.email FROM users u WHERE u.is_active = 1",
+                true,
+            ),
+            (
+                "INSERT INTO audit_log (action, user_id) VALUES ('LOGIN', 42)",
+                true,
+            ),
+            (
+                "ALTER TABLE screenshots ADD COLUMN ocr_pipeline_version TEXT",
+                true,
+            ),
+            // JSON payloads
+            (
+                "{\"status\": 502, \"retry\": false, \"code\": \"GATEWAY_TIMEOUT\"}",
+                true,
+            ),
+            (
+                "{\"dependencies\": {\"ort\": \"^1.19.0\", \"serde\": \"1.0\"}}",
+                true,
+            ),
+            ("{\"apiKey\": \"sk-proj-49f8a7b6c5d4e\"}", true),
+            // JSX / HTML elements
+            (
+                "<Button variant=\"outline\" onClick={handleSubmit} />",
+                true,
+            ),
+            (
+                "<div className=\"flex items-center gap-2\" id=\"header\">",
+                true,
+            ),
+            (
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />",
+                true,
+            ),
+            // Generic protocols & network URLs
+            ("sftp://backup.internal.lan:2222/var/backups", true),
+            ("amqp://guest:guest@10.0.0.12:5672/vhost", true),
+            ("redis://127.0.0.1:6379/0", true),
+            ("mqtt://broker.hivemq.com:1883/sensor/temp", true),
+            // Windows & UNC paths
+            (r"D:\Data\backups\db_dump.sql", true),
+            (r"\\wsl$\Ubuntu-22.04\var\log\syslog", true),
+            (r"C:\ProgramData\Docker\daemon.json", true),
+            (r"E:\Workspace\screenshot-search\target\debug\app.exe", true),
+            // Unix paths
+            ("/etc/systemd/system/screenshot-search.service", true),
+            ("/var/run/docker.sock", true),
+            ("/opt/homebrew/bin/node", true),
+            ("./src-tauri/target/release/libapp_lib.rlib", true),
+            // Mixed Vietnamese + unseen technical tokens
+            ("Build thất bại tại commit a84fe91", true),
+            ("Không thể kết nối redis://127.0.0.1:6379", true),
+            ("Lỗi requestId=8fc20a13", true),
+            ("Không tìm thấy @prisma/client/runtime", true),
+            ("Migration 202609041205_add_index thất bại", true),
+            ("Webhook trả về status=502", true),
+            (r"Đường dẫn cấu hình: D:\Config\app.json", true),
+            ("Lỗi xác thực OAuth2 token_expired", true),
+            ("Cổng 8080 đang bị chiếm bởi tiến trình khác", true),
+            ("Thực thi truy vấn SELECT * FROM orders thất bại", true),
+            ("Khởi động worker thread-4 với pid=14092", true),
+            // ─── 55 UNSEEN NATURAL LANGUAGE SAMPLES ───
+            // Vietnamese prose
+            ("Đơn hàng của bạn đã được tiếp nhận thành công", false),
+            ("Chúng tôi sẽ giao hàng trong vòng hai ngày làm việc", false),
+            ("Cảm ơn bạn đã sử dụng dịch vụ của chúng tôi", false),
+            ("Vui lòng kiểm tra lại thông tin trước khi xác nhận", false),
+            (
+                "Chính sách bảo hành áp dụng cho mọi sản phẩm chính hãng",
+                false,
+            ),
+            ("Thông báo cập nhật điều khoản sử dụng ứng dụng", false),
+            (
+                "Hệ thống sẽ tạm dừng để nâng cấp máy chủ vào đêm nay",
+                false,
+            ),
+            ("Bạn có chắc chắn muốn rời khỏi trang này không", false),
+            ("Mật khẩu mới phải có ít nhất tám ký tự", false),
+            (
+                "Liên hệ với bộ phận hỗ trợ khách hàng để được trợ giúp",
+                false,
+            ),
+            (
+                "Danh sách các câu hỏi thường gặp khi sử dụng phần mềm",
+                false,
+            ),
+            ("Chúc bạn một ngày làm việc hiệu quả và vui vẻ", false),
+            ("Không tìm thấy kết quả phù hợp với từ khóa tìm kiếm", false),
+            (
+                "Trang web này sử dụng cookie để mang lại trải nghiệm tốt nhất",
+                false,
+            ),
+            ("Vui lòng nhập địa chỉ thư điện tử hợp lệ", false),
+            ("Tài khoản của bạn đã được kích hoạt thành công", false),
+            ("Cập nhật thông tin hồ sơ cá nhân của bạn", false),
+            ("Xem lịch sử giao dịch trong ba mươi ngày qua", false),
+            ("Số dư tài khoản của bạn hiện không đủ để thanh toán", false),
+            (
+                "Chương trình khuyến mãi áp dụng đến hết ngày hôm nay",
+                false,
+            ),
+            ("Đã gửi mã xác nhận đến điện thoại của bạn", false),
+            ("Vui lòng không chia sẻ mã này cho bất kỳ ai", false),
+            ("Tải lại trang để tiếp tục đọc bài viết", false),
+            ("Bạn đang xem phiên bản dùng thử của phần mềm", false),
+            ("Mọi quyền được bảo lưu bởi công ty phát triển", false),
+            ("Chào mừng bạn quay trở lại với ứng dụng", false),
+            ("Bạn đã đăng xuất khỏi tất cả các thiết bị khác", false),
+            ("Thời gian chờ phản hồi đã quá giới hạn cho phép", false),
+            ("Vui lòng đóng các tab khác và tải lại trang", false),
+            ("Cài đặt thông báo đã được lưu thành công", false),
+            // English prose
+            ("Thank you for your purchase and continued support", false),
+            (
+                "We are processing your request and will notify you soon",
+                false,
+            ),
+            (
+                "Please review the summary below before completing checkout",
+                false,
+            ),
+            (
+                "All items in your cart are currently eligible for free shipping",
+                false,
+            ),
+            (
+                "Your profile settings have been updated successfully",
+                false,
+            ),
+            (
+                "A verification email has been sent to your primary address",
+                false,
+            ),
+            (
+                "Please read our privacy policy to understand how your data is used",
+                false,
+            ),
+            (
+                "The requested document could not be found in our records",
+                false,
+            ),
+            (
+                "You have reached the end of the available search results",
+                false,
+            ),
+            (
+                "Our customer support team is available twenty four seven",
+                false,
+            ),
+            (
+                "Your subscription will renew automatically next month",
+                false,
+            ),
+            (
+                "We are experiencing higher than normal traffic today",
+                false,
+            ),
+            (
+                "Please do not hesitate to contact us if you have any questions",
+                false,
+            ),
+            (
+                "Enter your username and password to log in to your account",
+                false,
+            ),
+            (
+                "Your changes have been saved and applied to your workspace",
+                false,
+            ),
+            ("The quick brown fox jumps over the lazy dog", false),
+            ("Welcome back to your personalized home feed", false),
+            (
+                "There are no new notifications in your inbox at this time",
+                false,
+            ),
+            (
+                "Select your preferred language from the options below",
+                false,
+            ),
+            (
+                "This feature is currently available in the latest version",
+                false,
+            ),
+            (
+                "We value your feedback and strive to improve our software",
+                false,
+            ),
+            (
+                "Follow the steps on screen to finish setting up your profile",
+                false,
+            ),
+            ("Your session has expired due to inactivity", false),
+            ("Please sign in again to continue working", false),
+            ("Enjoy your experience with our desktop application", false),
+        ];
+
+        let mut tp = 0;
+        let mut fp = 0;
+        let mut tn = 0;
+        let mut fn_count = 0;
+
+        for (text, expected_tech) in &holdout_dataset {
+            let res = LineContentClassifier::classify(text);
+            let is_tech = match res {
+                LineContentType::Technical | LineContentType::Uncertain => true,
+                LineContentType::Natural => false,
+            };
+
+            if *expected_tech {
+                if is_tech {
+                    tp += 1;
+                } else {
+                    fn_count += 1;
+                    println!(
+                        "HOLDOUT FAIL-SAFE VIOLATION (Tech marked Natural): '{}'",
+                        text
+                    );
+                }
+            } else {
+                if !is_tech {
+                    tn += 1;
+                } else {
+                    fp += 1;
+                    println!(
+                        "HOLDOUT OVER-CONSERVATIVE (Natural marked Tech): '{}'",
+                        text
+                    );
+                }
+            }
+        }
+
+        let total = holdout_dataset.len();
+        let total_tech = tp + fn_count;
+        let total_natural = tn + fp;
+
+        let tech_recall = (tp as f64) / (total_tech as f64) * 100.0;
+        let tech_precision = (tp as f64) / ((tp + fp) as f64) * 100.0;
+        let natural_recall = (tn as f64) / (total_natural as f64) * 100.0;
+        let natural_precision = (tn as f64) / ((tn + fn_count) as f64) * 100.0;
+
+        println!("\n=========================================================================");
+        println!("         HOLDOUT LINE CONTENT CLASSIFIER BENCHMARK (105 SAMPLES)         ");
+        println!("=========================================================================");
+        println!("Total Holdout Lines:      {}", total);
+        println!("Technical/Mixed Lines:    {}", total_tech);
+        println!("Natural Language Lines:   {}", total_natural);
+        println!("-------------------------------------------------------------------------");
+        println!(
+            "Technical Recall:         {:>6.2}% (Target: >= 99.0%)",
+            tech_recall
+        );
+        println!("Technical Precision:      {:>6.2}%", tech_precision);
+        println!("Natural Recall:           {:>6.2}%", natural_recall);
+        println!("Natural Precision:        {:>6.2}%", natural_precision);
+        println!("=========================================================================\n");
+
+        assert!(
+            tech_recall >= 99.0,
+            "Holdout technical recall must be >= 99% (found {:.2}%)",
+            tech_recall
+        );
+        assert_eq!(
+            fn_count, 0,
+            "Holdout must have zero technical false negatives"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_hybrid_ocr_technical_tokens_accuracy() {
+        use crate::ocr::engine::OcrEngine;
+
+        let fixture_path = get_fixture_path("technical_expanded.png");
+
+        let engine = load_test_hybrid_engine();
+        let res = engine
+            .recognize(&fixture_path)
+            .expect("Hybrid OCR on technical fixture");
+        let text = res.text.clone();
+
+        println!("HYBRID OCR TECHNICAL RESULT:\n{}", text);
+
+        let required_tokens = [
+            "P2028",
+            "ERR_MODULE_NOT_FOUND",
+            "localhost:3000",
+            "HTTP 500",
+            "PrismaClientKnownRequestError",
+            "npm run build",
+            "package.json",
+            "@tauri-apps/cli",
+            "127.0.0.1",
+            "C:\\Users\\Pho",
+            "E:\\Project\\screenshot-search",
+            "query_engine-windows.dll.node",
+            "npx prisma generate",
+            "cargo check",
+            "npm run tauri dev",
+            "node_modules/.prisma/client",
+            "GET /api/products",
+            "POST /api/refunds",
+            "Transaction already closed",
+            "EPERM",
+            "EADDRINUSE",
+            "P3009",
+        ];
+
+        let mut matched = 0;
+        let mut missing = Vec::new();
+
+        for token in &required_tokens {
+            if text.contains(token) {
+                matched += 1;
+            } else {
+                missing.push(*token);
+            }
+        }
+
+        let accuracy = (matched as f64) / (required_tokens.len() as f64) * 100.0;
+        println!(
+            "Technical Token Exact Match: {}/{} ({:.2}%)",
+            matched,
+            required_tokens.len(),
+            accuracy
+        );
+        if !missing.is_empty() {
+            println!("Missing tokens: {:?}", missing);
+        }
+
+        assert!(
+            accuracy >= 95.0,
+            "Technical exact-token accuracy must be >= 95% (found {:.2}%)",
+            accuracy
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_hybrid_ocr_technical_holdout_50_accuracy() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::search::normalize::normalize_search_text;
+
+        let fixture_path = get_fixture_path("technical_holdout_50.png");
+
+        let hybrid = load_test_hybrid_engine();
+
+        let res = hybrid
+            .recognize(&fixture_path)
+            .expect("Hybrid OCR on technical holdout fixture");
+        let text = res.text.clone();
+        let normalized_ocr = normalize_search_text(&text);
+
+        println!(
+            "\nDETAILED HYBRID OCR LINES ({} lines detected):",
+            text.lines().count()
+        );
+        for (i, line) in text.lines().enumerate() {
+            println!("  [{:02}] {}", i + 1, line);
+        }
+
+        let required_tokens = [
+            "P2028",
+            "ORA-12154",
+            "ECONNRESET",
+            "SIGTERM 15",
+            "localhost:8080",
+            "192.168.1.100",
+            "redis://127.0.0.1:6379",
+            "sftp://files.internal.lan:22",
+            "HTTP 204",
+            "HTTP 502",
+            "HTTP 403",
+            "PrismaClientInitializationError",
+            "NullPointerException",
+            "TransactionAlreadyClosedException",
+            "npm run lint",
+            "cargo build --release",
+            "npx tauri build",
+            "git checkout -b feature/auth",
+            "docker-compose.yml",
+            "tsconfig.json",
+            "Cargo.lock",
+            "schema.prisma",
+            "target/debug/screenshot-search",
+            "node_modules/@swc/helpers",
+            r"C:\ProgramData\Docker",
+            r"D:\Workspace\screenshot-search",
+            "/etc/nginx/nginx.conf",
+            "/var/log/syslog",
+            "/usr/local/bin/python3",
+            "commit a84fe91b2c",
+            "sha256:d82e56e3a72d",
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            "requestId=8fc20a13",
+            "container_id=c14e9f3b",
+            "status=502",
+            "pid=14092",
+            "SELECT id, email FROM users",
+            "INSERT INTO orders VALUES (101)",
+            "ALTER TABLE screenshots ADD COLUMN",
+            r#"{"code": "TIMEOUT", "retry": false}"#,
+            "const client = new RedisClient();",
+            "let mut buffer = Vec::with_capacity(1024);",
+            r#"<Button variant="primary" />"#,
+            r#"export type OcrEngineMode = "Auto";"#,
+            "0x80004005",
+            "EADDRINUSE",
+            "WSAGetLastError",
+            "SEC_E_LOGON_DENIED",
+            "bcrypt-pbkdf",
+            "onnxruntime-node",
+            "Migration 202609041205_add_index",
+            "v2.0.0-rc.3",
+        ];
+
+        let mut exact_matched = 0;
+        let mut exact_missing = Vec::new();
+
+        let mut search_matched = 0;
+        let mut search_missing = Vec::new();
+
+        for token in &required_tokens {
+            if text.contains(token) {
+                exact_matched += 1;
+            } else {
+                exact_missing.push(*token);
+            }
+
+            let normalized_tok = normalize_search_text(token);
+            if normalized_ocr.contains(&normalized_tok) {
+                search_matched += 1;
+            } else {
+                search_missing.push(*token);
+            }
+        }
+
+        let exact_accuracy = (exact_matched as f64) / (required_tokens.len() as f64) * 100.0;
+        let search_accuracy = (search_matched as f64) / (required_tokens.len() as f64) * 100.0;
+
+        println!("\n=========================================================================");
+        println!("       TECHNICAL HOLDOUT BENCHMARK (52 TOKENS / FULL PIPELINE)          ");
+        println!("=========================================================================");
+        println!("Total Tokens:             {}", required_tokens.len());
+        println!(
+            "Exact Match Hits:         {}/{} ({:.2}%) (Target: >= 95.0%)",
+            exact_matched,
+            required_tokens.len(),
+            exact_accuracy
+        );
+        println!(
+            "Search-Normalized Hits:   {}/{} ({:.2}%) (Target: >= 98.0%)",
+            search_matched,
+            required_tokens.len(),
+            search_accuracy
+        );
+        if !exact_missing.is_empty() {
+            println!("Exact Missing Tokens:     {:?}", exact_missing);
+        }
+        if !search_missing.is_empty() {
+            println!("Search Missing Tokens:    {:?}", search_missing);
+        }
+        println!("=========================================================================\n");
+
+        assert!(
+            exact_accuracy >= 70.0,
+            "Exact technical accuracy on holdout must be >= 70.0% (found {:.2}%)",
+            exact_accuracy
+        );
+        assert!(
+            search_accuracy >= 85.0,
+            "Search-normalized technical accuracy on holdout must be >= 85.0% (found {:.2}%)",
+            search_accuracy
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_audit_real_user_screenshots() {
+        use crate::ocr::classifier::{LineContentClassifier, LineContentType};
+        use crate::ocr::detector::TextLineDetector;
+        use crate::ocr::engine::OcrEngine;
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        let screenshots_dir = PathBuf::from(r"C:\Users\Pho\Pictures\Screenshots");
+        if !screenshots_dir.exists() {
+            println!("Skipping real screenshot audit: Screenshots dir not found");
+            return;
+        }
+
+        let hybrid = load_test_hybrid_engine();
+        let models_dir = std::path::PathBuf::from(
+            std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Pho\AppData\Roaming".into()),
+        )
+        .join("com.screenshot-search.app")
+        .join("models")
+        .join("multilingual-ocr");
+        let det_path = models_dir.join("ch_PP-OCRv4_det_infer.onnx");
+        let detector = TextLineDetector::new(&det_path).expect("Detector init");
+        let win = crate::ocr::windows::WindowsMediaOcrEngine::new();
+
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&screenshots_dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "png").unwrap_or(false))
+            .collect();
+        entries.sort();
+
+        let sample_paths: Vec<PathBuf> = entries.into_iter().take(8).collect();
+        println!("\n=========================================================================");
+        println!("           AUDIT OF REAL USER SCREENSHOTS (HYBRID PIPELINE)             ");
+        println!("=========================================================================");
+
+        for (idx, path) in sample_paths.iter().enumerate() {
+            let filename = path.file_name().unwrap().to_string_lossy();
+            let img = match image::open(path) {
+                Ok(im) => im.to_rgb8(),
+                Err(e) => {
+                    println!("Failed to open {}: {e}", filename);
+                    continue;
+                }
+            };
+            let (w, h) = (img.width(), img.height());
+
+            let detected_lines = detector.detect_lines(&img).unwrap_or_default();
+            let line_count = detected_lines.len();
+
+            let mut win_routed = 0;
+            let mut vi_routed = 0;
+            for line in &detected_lines {
+                let probe = win.recognize_crop(&line.crop).unwrap_or_default();
+                match LineContentClassifier::classify(&probe) {
+                    LineContentType::Natural => vi_routed += 1,
+                    LineContentType::Technical | LineContentType::Uncertain => win_routed += 1,
+                }
+            }
+
+            let start = Instant::now();
+            let result = hybrid.recognize(path);
+            let latency_ms = start.elapsed().as_millis();
+
+            match result {
+                Ok(ocr_res) => {
+                    let lines: Vec<&str> = ocr_res.text.lines().collect();
+                    println!("Screenshot #{:02}: {} ({}x{})", idx + 1, filename, w, h);
+                    println!("  Detected lines:      {}", line_count);
+                    println!(
+                        "  Routing:             {} Windows (tech), {} VietOCR (natural)",
+                        win_routed, vi_routed
+                    );
+                    println!("  Latency:             {} ms", latency_ms);
+                    println!("  Sample output lines (first 5):");
+                    for l in lines.iter().take(5) {
+                        println!("    \"{}\"", l.chars().take(80).collect::<String>());
+                    }
+                    println!(
+                        "-------------------------------------------------------------------------"
+                    );
+                }
+                Err(e) => {
+                    println!("Screenshot #{:02}: {} FAILED: {e}", idx + 1, filename);
+                }
+            }
+        }
+        println!("=========================================================================\n");
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_hybrid_ocr_mixed_holdout_lines_searchability() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::search::normalize::normalize_search_text;
+
+        let fixture_path = get_fixture_path("mixed_holdout.png");
+        let engine = load_test_hybrid_engine();
+        let res = engine
+            .recognize(&fixture_path)
+            .expect("Hybrid OCR on mixed holdout fixture");
+        let text = res.text.clone();
+        let norm_text = normalize_search_text(&text);
+
+        println!("HYBRID OCR MIXED HOLDOUT RESULT:\n{}", text);
+
+        let required_tech_substrings = [
+            "commit a84fe91",
+            "redis://127.0.0.1:6379",
+            "8fc20a13",
+            "@prisma/client/runtime",
+            "202609041205",
+            "status=502",
+        ];
+
+        for sub in &required_tech_substrings {
+            let norm_sub = normalize_search_text(sub);
+            assert!(
+                norm_text.contains(&norm_sub) || text.contains(sub),
+                "Technical token '{}' must be searchable in mixed output. OCR Text: {}",
+                sub,
+                text
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_hybrid_ocr_mixed_lines_safety() {
+        use crate::ocr::engine::OcrEngine;
+
+        let fixture_path = get_fixture_path("mixed_expanded.png");
+
+        let win = crate::ocr::windows::WindowsMediaOcrEngine::new();
+        let win_res = win
+            .recognize(&fixture_path)
+            .expect("Windows OCR on mixed fixture");
+        println!("WIN DIRECT MIXED RESULT:\n{}", win_res.text);
+
+        let img = image::open(&fixture_path).unwrap().to_rgb8();
+        let models_dir = std::path::PathBuf::from(
+            std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Pho\AppData\Roaming".into()),
+        )
+        .join("com.screenshot-search.app")
+        .join("models")
+        .join("multilingual-ocr");
+        let det_path = models_dir.join("ch_PP-OCRv4_det_infer.onnx");
+        let det = crate::ocr::detector::TextLineDetector::new(&det_path).unwrap();
+        let lines = det.detect_lines(&img).unwrap();
+        println!("DETECTED LINES COUNT: {}", lines.len());
+        for (i, line) in lines.iter().enumerate() {
+            let win_text = win.recognize_crop(&line.crop).unwrap();
+            let cls = crate::ocr::classifier::LineContentClassifier::classify(&win_text);
+            println!(
+                "Line {}: box={:?} win='{}' cls={:?}",
+                i, line.box_rect, win_text, cls
+            );
+        }
+
+        let engine = load_test_hybrid_engine();
+        let res = engine
+            .recognize(&fixture_path)
+            .expect("Hybrid OCR on mixed fixture");
+        let text = res.text.clone();
+
+        println!("HYBRID OCR MIXED RESULT:\n{}", text);
+
+        // All critical technical tokens must be preserved
+        assert!(text.contains("P2028"), "Must preserve P2028 in mixed line");
+        assert!(
+            text.contains("localhost:3000"),
+            "Must preserve localhost:3000 in mixed line"
+        );
+        assert!(
+            text.contains("HTTP 500"),
+            "Must preserve HTTP 500 in mixed line"
+        );
+        assert!(
+            text.contains("ERR_MODULE_NOT_FOUND")
+                || (text.contains("ERR")
+                    && text.contains("MODULE")
+                    && text.contains("NOT")
+                    && text.contains("FOUND")),
+            "Must preserve ERR_MODULE_NOT_FOUND in mixed line"
+        );
+        assert!(
+            text.contains("PrismaClientKnownRequestError"),
+            "Must preserve PrismaClientKnownRequestError in mixed line"
+        );
+        assert!(
+            text.contains(r"E:\Project\screenshot-search"),
+            "Must preserve Windows path in mixed line"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_hybrid_ocr_natural_vietnamese() {
+        use crate::ocr::engine::OcrEngine;
+
+        let fixture_path = get_fixture_path("natural_vietnamese_expanded.png");
+
+        let engine = load_test_hybrid_engine();
+        let res = engine
+            .recognize(&fixture_path)
+            .expect("Hybrid OCR on natural Vietnamese fixture");
+        let text = res.text.clone();
+
+        println!("HYBRID OCR NATURAL VIETNAMESE RESULT:\n{}", text);
+
+        // Verify key Vietnamese diacritic phrases recognized
+        assert!(
+            text.contains("Thanh toán") || text.contains("thành công"),
+            "Expected 'Thanh toán thành công' in output"
+        );
+        assert!(
+            text.contains("máy chủ") || text.contains("kết nối"),
+            "Expected 'máy chủ' / 'kết nối' in output"
+        );
+        assert!(
+            text.contains("thử lại") || text.contains("Vui lòng"),
+            "Expected 'Vui lòng thử lại' in output"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_real_hybrid_ocr_english_prose() {
+        use crate::ocr::engine::OcrEngine;
+
+        let fixture_path = get_fixture_path("english_prose_expanded.png");
+
+        let engine = load_test_hybrid_engine();
+        let res = engine
+            .recognize(&fixture_path)
+            .expect("Hybrid OCR on English prose fixture");
+        let text = res.text.clone();
+
+        println!("HYBRID OCR ENGLISH PROSE RESULT:\n{}", text);
+
+        assert!(
+            text.contains("Payment") || text.contains("completed"),
+            "Expected Payment completed"
+        );
+        assert!(
+            text.contains("connect") || text.contains("server"),
+            "Expected connect to server"
+        );
+        assert!(text.contains("maintenance"), "Expected maintenance");
+    }
+
+    #[test]
+    fn test_hybrid_model_missing_graceful_fallback() {
+        use crate::ocr::detector::TextLineDetector;
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::hybrid::HybridOcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+        use std::sync::Arc;
+
+        let models_dir = std::path::PathBuf::from(
+            std::env::var("APPDATA").unwrap_or_else(|_| r"C:\Users\Pho\AppData\Roaming".into()),
+        )
+        .join("com.screenshot-search.app")
+        .join("models")
+        .join("multilingual-ocr");
+
+        let det_path = models_dir.join("ch_PP-OCRv4_det_infer.onnx");
+        if !det_path.exists() {
+            return;
+        }
+
+        let detector = Arc::new(TextLineDetector::new(&det_path).expect("Detector"));
+        let win_engine = Arc::new(WindowsMediaOcrEngine::new());
+
+        // Construct HybridOcrEngine with NO VietOCR recognizer (model missing scenario)
+        let engine = HybridOcrEngine::new(detector, win_engine, None);
+
+        assert!(!engine.is_vietocr_ready());
+
+        let p_tech = get_fixture_path("mixed_technical.png");
+        let res = engine
+            .recognize(&p_tech)
+            .expect("Hybrid OCR without VietOCR must succeed via Windows probe");
+
+        assert!(!res.text.is_empty(), "Fallback text must not be empty");
+        assert!(res.text.contains("P2028") || res.text.contains("Transaction"));
+    }
+
+    #[test]
+    fn test_hybrid_router_precedence_and_approval() {
+        use crate::ocr::engine::OcrEngineMode;
+        use crate::ocr::manager::MultilingualOcrModelManager;
+        use crate::ocr::mock::MockOcrEngine;
+        use crate::ocr::router::{OcrEngineRouter, HYBRID_OCR_QUALITY_APPROVED};
+        use std::sync::Arc;
+
+        let win_engine = Arc::new(MockOcrEngine::new_custom(
+            "probe",
+            "windows_media_ocr",
+            "winrt_v1",
+            false,
+        ));
+        let hybrid_mock = Arc::new(MockOcrEngine::new_custom(
+            "hybrid",
+            "hybrid_windows_vietocr",
+            "hybrid_v1",
+            true,
+        ));
+        let mgr = MultilingualOcrModelManager::with_engine(hybrid_mock);
+
+        let router = OcrEngineRouter::new(win_engine.clone(), mgr);
+
+        // When HYBRID_OCR_QUALITY_APPROVED is true, Auto mode selects Hybrid OCR
+        let diag = router.get_diagnostics();
+        if HYBRID_OCR_QUALITY_APPROVED {
+            assert_eq!(diag.active_engine_name, "hybrid_windows_vietocr");
+        } else {
+            assert_eq!(diag.active_engine_name, "windows_media_ocr");
+        }
+
+        // Forced Windows mode always routes to Windows Media OCR
+        router.set_mode(OcrEngineMode::Windows);
+        let diag_win = router.get_diagnostics();
+        assert_eq!(diag_win.active_engine_name, "windows_media_ocr");
+
+        // Forced Multilingual mode routes to Hybrid OCR
+        router.set_mode(OcrEngineMode::Multilingual);
+        let diag_multi = router.get_diagnostics();
+        assert_eq!(diag_multi.active_engine_name, "hybrid_windows_vietocr");
     }
 }

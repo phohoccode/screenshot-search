@@ -6,30 +6,51 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 
 use crate::errors::AppError;
+use crate::ocr::detector::TextLineDetector;
 use crate::ocr::engine::OcrEngine;
-use crate::ocr::multilingual::MultilingualOcrEngine;
+use crate::ocr::hybrid::HybridOcrEngine;
+use crate::ocr::vietocr::VietOcrOnnxRecognizer;
+use crate::ocr::windows::WindowsMediaOcrEngine;
 
 pub const DEFAULT_OCR_MODEL_ID: &str = "multilingual-ocr";
-pub const DEFAULT_OCR_MODEL_VERSION: &str = "ppocr_v4";
-pub const APPROXIMATE_OCR_MODEL_SIZE_MB: usize = 16;
+pub const DEFAULT_OCR_MODEL_VERSION: &str = "hybrid_v1";
+pub const APPROXIMATE_OCR_MODEL_SIZE_MB: usize = 158;
 
 /// Remote model asset definitions with sha256 checksums.
 pub const DET_MODEL_FILENAME: &str = "ch_PP-OCRv4_det_infer.onnx";
-pub const REC_MODEL_FILENAME: &str = "multilingual_PP-OCRv4_rec_infer.onnx";
-pub const KEYS_FILENAME: &str = "keys.txt";
+pub const VIETOCR_ENCODER_FILENAME: &str = "vgg_encoder.onnx";
+pub const VIETOCR_ENCODER_DATA_FILENAME: &str = "vgg_encoder.onnx.data";
+pub const VIETOCR_DECODER_FILENAME: &str = "vgg_decoder.onnx";
+pub const VIETOCR_VOCAB_FILENAME: &str = "vocab.json";
 
 pub const DET_MODEL_URL: &str =
     "https://huggingface.co/cycloneboy/ch_PP-OCRv4_det_infer/resolve/main/model.onnx";
-pub const REC_MODEL_URL: &str =
-    "https://huggingface.co/cycloneboy/ch_PP-OCRv4_rec_infer/resolve/main/model.onnx";
-
 pub const DET_MODEL_SHA256: &str =
     "69ce850fec741a2a4568c7c924bb025c9d4f1129e5f96ab428c799ccc5ef2275";
-pub const REC_MODEL_SHA256: &str =
-    "ad7dd55f6759fa02333bff6eb179a4f51be5b89cbe6f710249c95f47d0211350";
-pub const KEYS_URL: &str =
-    "https://huggingface.co/cycloneboy/ch_PP-OCRv4_rec_infer/resolve/main/ch_dict.txt";
-pub const KEYS_SHA256: &str = "b22996db93ffedffa90abf62009659af14ae22df06a2da5a1ce0e6fb1117af86";
+
+pub const VIETOCR_ENCODER_URL: &str =
+    "https://huggingface.co/vemines/vietocr-onnx/resolve/main/vgg_encoder.onnx";
+pub const VIETOCR_ENCODER_SHA256: &str =
+    "37528399f7f4f166300a7701bfcf648765829211ba00c02b2952831278d5a185";
+
+pub const VIETOCR_ENCODER_DATA_URL: &str =
+    "https://huggingface.co/vemines/vietocr-onnx/resolve/main/vgg_encoder.onnx.data";
+pub const VIETOCR_ENCODER_DATA_SHA256: &str =
+    "395df00d340fbb987e07315568cf567575cf31f7f962544734fec6ebe7c84b9e";
+
+pub const VIETOCR_DECODER_URL: &str =
+    "https://huggingface.co/vemines/vietocr-onnx/resolve/main/vgg_decoder.onnx";
+pub const VIETOCR_DECODER_SHA256: &str =
+    "a77eb69679c27fa9a1ecc7903bb45b53b52cb37a03cf3d6cd93718c0b3c7aaa9";
+
+pub const VIETOCR_VOCAB_URL: &str =
+    "https://huggingface.co/vemines/vietocr-onnx/resolve/main/vocab.json";
+pub const VIETOCR_VOCAB_SHA256: &str =
+    "b4ec9437ef82d952a65c101ea7ec6748a7168777c2d84cdb6a1bba7540bd163d";
+
+/// Legacy PP-OCR recognizer constants (retained for backward compatibility / tests)
+pub const REC_MODEL_FILENAME: &str = "multilingual_PP-OCRv4_rec_infer.onnx";
+pub const KEYS_FILENAME: &str = "keys.txt";
 
 /// High-level status of the local multilingual OCR model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -117,43 +138,63 @@ impl MultilingualOcrModelManager {
         }
 
         let det_path = self.models_dir.join(DET_MODEL_FILENAME);
-        let rec_path = self.models_dir.join(REC_MODEL_FILENAME);
-        let keys_path = self.models_dir.join(KEYS_FILENAME);
+        let enc_path = self.models_dir.join(VIETOCR_ENCODER_FILENAME);
+        let enc_data_path = self.models_dir.join(VIETOCR_ENCODER_DATA_FILENAME);
+        let dec_path = self.models_dir.join(VIETOCR_DECODER_FILENAME);
+        let vocab_path = self.models_dir.join(VIETOCR_VOCAB_FILENAME);
 
-        det_path.exists() && rec_path.exists() && keys_path.exists()
+        det_path.exists()
+            && enc_path.exists()
+            && enc_data_path.exists()
+            && dec_path.exists()
+            && vocab_path.exists()
     }
 
-    /// Loads the multilingual OCR engine from the local models directory.
+    /// Loads the hybrid OCR engine from the local models directory.
     pub fn load_local_engine(&self) -> Result<(), AppError> {
         if !self.has_local_model_files() {
             *self.status.write().unwrap() = MultilingualOcrStatus::NotInstalled;
             return Err(AppError::ocr_unavailable(
-                "Multilingual OCR model files not found on disk",
+                "Hybrid OCR model files not found on disk",
             ));
         }
 
         log::info!(
-            "Loading Multilingual OCR engine from {}",
+            "Loading Hybrid OCR engine (DBNet + VietOCR ONNX) from {}",
             self.models_dir.display()
         );
-        match MultilingualOcrEngine::new(&self.models_dir) {
-            Ok(engine) => {
-                let arc_engine: Arc<dyn OcrEngine> = Arc::new(engine);
-                *self.engine.write().unwrap() = Some(arc_engine);
-                *self.status.write().unwrap() = MultilingualOcrStatus::Ready;
-                log::info!(
-                    "Multilingual OCR engine initialized successfully and is ready for inference"
-                );
-                Ok(())
-            }
+
+        let det_path = self.models_dir.join(DET_MODEL_FILENAME);
+
+        let detector = match TextLineDetector::new(&det_path) {
+            Ok(d) => Arc::new(d),
             Err(e) => {
-                log::error!("Failed to initialize Multilingual OCR engine: {e}");
+                log::error!("Failed to initialize DBNet line detector: {e}");
                 *self.status.write().unwrap() = MultilingualOcrStatus::Error {
-                    message: format!("Failed to initialize Multilingual OCR engine: {e}"),
+                    message: format!("Failed to initialize detector: {e}"),
                 };
-                Err(e)
+                return Err(e);
             }
-        }
+        };
+
+        let recognizer = match VietOcrOnnxRecognizer::new(&self.models_dir) {
+            Ok(r) => Arc::new(r),
+            Err(e) => {
+                log::error!("Failed to initialize VietOCR recognizer: {e}");
+                *self.status.write().unwrap() = MultilingualOcrStatus::Error {
+                    message: format!("Failed to initialize recognizer: {e}"),
+                };
+                return Err(e);
+            }
+        };
+
+        let win_engine = Arc::new(WindowsMediaOcrEngine::new());
+        let hybrid_engine = HybridOcrEngine::new(detector, win_engine, Some(recognizer));
+        let arc_engine: Arc<dyn OcrEngine> = Arc::new(hybrid_engine);
+        *self.engine.write().unwrap() = Some(arc_engine);
+        *self.status.write().unwrap() = MultilingualOcrStatus::Ready;
+        log::info!("Hybrid OCR engine initialized successfully and is ready for inference");
+        Ok(())
     }
 
     /// Initiates on-demand background download of the model assets.
@@ -166,7 +207,7 @@ impl MultilingualOcrModelManager {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            log::warn!("Multilingual OCR model download already in progress");
+            log::warn!("Hybrid OCR model download already in progress");
             return Ok(());
         }
 
@@ -181,7 +222,9 @@ impl MultilingualOcrModelManager {
 
                 match result {
                     Ok(_) => {
-                        log::info!("Multilingual OCR model download completed successfully. Loading engine...");
+                        log::info!(
+                            "Hybrid OCR model download completed successfully. Loading engine..."
+                        );
                         if let Ok(()) = self_clone.load_local_engine() {
                             if let Some(cb) = on_complete {
                                 cb();
@@ -189,7 +232,7 @@ impl MultilingualOcrModelManager {
                         }
                     }
                     Err(e) => {
-                        log::error!("Multilingual OCR model download failed: {e}");
+                        log::error!("Hybrid OCR model download failed: {e}");
                         *self_clone.status.write().unwrap() = MultilingualOcrStatus::Error {
                             message: format!("Download failed: {e}"),
                         };
@@ -205,34 +248,52 @@ impl MultilingualOcrModelManager {
         let _ = fs::create_dir_all(&self.models_dir);
 
         log::info!(
-            "Downloading multilingual OCR model files to {}",
+            "Downloading hybrid OCR model files to {}",
             self.models_dir.display()
         );
 
-        // 1. Keys character dictionary for PP-OCRv4 recognition
+        // 1. Detection ONNX model (DBNet)
         *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 10.0 };
-        let keys_target = self.models_dir.join(KEYS_FILENAME);
-        let keys_tmp = self.models_dir.join(format!("{KEYS_FILENAME}.tmp"));
-        let keys_bytes = crate::ocr::multilingual::DEFAULT_KEYS_DICT.as_bytes();
-        verify_and_install_asset(keys_bytes, KEYS_SHA256, &keys_target, &keys_tmp)?;
-
-        // 2. Detection ONNX model
-        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 45.0 };
         let det_target = self.models_dir.join(DET_MODEL_FILENAME);
         if !det_target.exists() {
             download_and_verify_asset(DET_MODEL_URL, DET_MODEL_SHA256, &det_target)?;
         }
 
-        // 3. Recognition ONNX model
-        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 85.0 };
-        let rec_target = self.models_dir.join(REC_MODEL_FILENAME);
-        if !rec_target.exists() {
-            download_and_verify_asset(REC_MODEL_URL, REC_MODEL_SHA256, &rec_target)?;
+        // 2. VietOCR vocab
+        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 15.0 };
+        let vocab_target = self.models_dir.join(VIETOCR_VOCAB_FILENAME);
+        if !vocab_target.exists() {
+            download_and_verify_asset(VIETOCR_VOCAB_URL, VIETOCR_VOCAB_SHA256, &vocab_target)?;
+        }
+
+        // 3. VietOCR encoder ONNX model
+        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 30.0 };
+        let enc_target = self.models_dir.join(VIETOCR_ENCODER_FILENAME);
+        if !enc_target.exists() {
+            download_and_verify_asset(VIETOCR_ENCODER_URL, VIETOCR_ENCODER_SHA256, &enc_target)?;
+        }
+
+        // 4. VietOCR encoder weights data
+        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 70.0 };
+        let enc_data_target = self.models_dir.join(VIETOCR_ENCODER_DATA_FILENAME);
+        if !enc_data_target.exists() {
+            download_and_verify_asset(
+                VIETOCR_ENCODER_DATA_URL,
+                VIETOCR_ENCODER_DATA_SHA256,
+                &enc_data_target,
+            )?;
+        }
+
+        // 5. VietOCR decoder ONNX model
+        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 95.0 };
+        let dec_target = self.models_dir.join(VIETOCR_DECODER_FILENAME);
+        if !dec_target.exists() {
+            download_and_verify_asset(VIETOCR_DECODER_URL, VIETOCR_DECODER_SHA256, &dec_target)?;
         }
 
         *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 100.0 };
         log::info!(
-            "Multilingual OCR assets verified and atomically installed at {}",
+            "Hybrid OCR assets verified and atomically installed at {}",
             self.models_dir.display()
         );
 

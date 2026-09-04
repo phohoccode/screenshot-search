@@ -104,6 +104,154 @@ impl WindowsMediaOcrEngine {
             }
         }
     }
+
+    /// Performs in-memory OCR recognition on a cropped text line image without disk I/O.
+    pub fn recognize_crop(&self, crop: &image::RgbImage) -> Result<String, AppError> {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Graphics::Imaging::{
+                BitmapDecoder, BitmapInterpolationMode, BitmapTransform, ColorManagementMode,
+                ExifOrientationMode,
+            };
+            use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+
+            let engine = self.engine.as_ref().ok_or_else(|| {
+                AppError::ocr_unavailable(
+                    "Windows Media OCR engine is not initialized or supported on this system",
+                )
+            })?;
+
+            let (w, h) = (crop.width(), crop.height());
+            if w < 2 || h < 2 {
+                return Ok(String::new());
+            }
+
+            // WinRT OCR performs significantly better when there is sufficient padding/margin
+            // around the text line, preventing boundary character truncation and false rejections.
+            let pad_x = 32u32;
+            let pad_y = 16u32;
+            let padded_w = w + pad_x * 2;
+            let padded_h = h + pad_y * 2;
+            let mut padded =
+                image::RgbImage::from_pixel(padded_w, padded_h, image::Rgb([255, 255, 255]));
+            image::imageops::overlay(&mut padded, crop, pad_x as i64, pad_y as i64);
+
+            // Encode padded crop to PNG in memory
+            let mut png_bytes = Vec::new();
+            let mut cursor = std::io::Cursor::new(&mut png_bytes);
+            padded
+                .write_to(&mut cursor, image::ImageFormat::Png)
+                .map_err(|e| AppError::ocr_decode(format!("Failed to encode crop to PNG: {e}")))?;
+
+            let stream = InMemoryRandomAccessStream::new().map_err(|e| {
+                AppError::ocr_decode(format!("Failed to create in-memory stream: {e}"))
+            })?;
+
+            let writer = DataWriter::CreateDataWriter(&stream).map_err(|e| {
+                AppError::ocr_decode(format!("Failed to create stream writer: {e}"))
+            })?;
+
+            writer.WriteBytes(&png_bytes).map_err(|e| {
+                AppError::ocr_decode(format!("Failed to write bytes to stream: {e}"))
+            })?;
+
+            writer
+                .StoreAsync()
+                .map_err(|e| AppError::ocr_decode(format!("Failed to store stream async: {e}")))?
+                .get()
+                .map_err(|e| AppError::ocr_decode(format!("Stream store operation failed: {e}")))?;
+
+            stream.Seek(0).map_err(|e| {
+                AppError::ocr_decode(format!("Failed to seek stream to beginning: {e}"))
+            })?;
+
+            let decoder = BitmapDecoder::CreateAsync(&stream)
+                .map_err(|e| AppError::ocr_decode(format!("Failed to create bitmap decoder: {e}")))?
+                .get()
+                .map_err(|e| {
+                    AppError::ocr_decode(format!("Image decoding failed for line crop: {e}"))
+                })?;
+
+            let pixel_format = decoder
+                .BitmapPixelFormat()
+                .map_err(|e| AppError::ocr_decode(e.to_string()))?;
+            let alpha_mode = decoder
+                .BitmapAlphaMode()
+                .map_err(|e| AppError::ocr_decode(e.to_string()))?;
+
+            // Upscale small text line crops (original h < 36px) with Linear interpolation
+            // so text features (descenders on 'j'/'p', crossbars on 'T', dots) are clearly resolved by WinRT OCR.
+            let bitmap = if h < 36 {
+                let scale = (36.0 / (h as f64)).max(1.75);
+                let target_w = ((padded_w as f64) * scale).round() as u32;
+                let target_h = ((padded_h as f64) * scale).round() as u32;
+
+                let transform = BitmapTransform::new().map_err(|e| {
+                    AppError::ocr_decode(format!("Failed to create BitmapTransform: {e}"))
+                })?;
+                transform.SetScaledWidth(target_w).map_err(|e| {
+                    AppError::ocr_decode(format!("Failed to set scaled width: {e}"))
+                })?;
+                transform.SetScaledHeight(target_h).map_err(|e| {
+                    AppError::ocr_decode(format!("Failed to set scaled height: {e}"))
+                })?;
+                transform
+                    .SetInterpolationMode(BitmapInterpolationMode::Linear)
+                    .map_err(|e| {
+                        AppError::ocr_decode(format!("Failed to set interpolation mode: {e}"))
+                    })?;
+
+                decoder
+                    .GetSoftwareBitmapTransformedAsync(
+                        pixel_format,
+                        alpha_mode,
+                        &transform,
+                        ExifOrientationMode::IgnoreExifOrientation,
+                        ColorManagementMode::DoNotColorManage,
+                    )
+                    .map_err(|e| {
+                        AppError::ocr_decode(format!(
+                            "Failed to get transformed software bitmap: {e}"
+                        ))
+                    })?
+                    .get()
+                    .map_err(|e| {
+                        AppError::ocr_decode(format!("Crop software bitmap transform failed: {e}"))
+                    })?
+            } else {
+                decoder
+                    .GetSoftwareBitmapAsync()
+                    .map_err(|e| {
+                        AppError::ocr_decode(format!("Failed to get software bitmap: {e}"))
+                    })?
+                    .get()
+                    .map_err(|e| {
+                        AppError::ocr_decode(format!("Software bitmap conversion failed: {e}"))
+                    })?
+            };
+
+            let ocr_result = engine
+                .RecognizeAsync(&bitmap)
+                .map_err(|e| AppError::ocr(format!("Crop recognition execution failed: {e}")))?
+                .get()
+                .map_err(|e| {
+                    AppError::ocr(format!("Crop OCR recognition result extraction error: {e}"))
+                })?;
+
+            let text = ocr_result
+                .Text()
+                .map_err(|e| AppError::ocr(format!("Failed to extract recognized text: {e}")))?
+                .to_string();
+
+            Ok(text.trim().to_string())
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = crop;
+            Ok(String::new())
+        }
+    }
 }
 
 impl Default for WindowsMediaOcrEngine {

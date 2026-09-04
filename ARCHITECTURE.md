@@ -44,7 +44,7 @@ Persistence
 SQLite + FTS5
 ```
 
-Phase 3.5 OCR Engine Router Architecture:
+Phase 3.5C Hybrid Per-Line OCR Architecture:
 
 ```text
 Screenshot File
@@ -52,18 +52,43 @@ Screenshot File
    ▼
 OcrEngineRouter (Auto / Windows / Multilingual)
    │
-   ├── [Auto / Windows] ──────► WindowsMediaOcrEngine (WinRT native)
-   │                             └── Fast native OCR (prioritized if vi-VN supported)
+   ├── [Windows Mode] ──────────► WindowsMediaOcrEngine (WinRT native)
    │
-   └── [Auto / Multilingual] ──► MultilingualOcrEngine (Local PP-OCRv4 ONNX)
-                                 └── High-accuracy Vietnamese & diacritics (~16 MB)
-   │
-   ▼
-Normalized OCR Output
-   │
-   ├──► SQLite `screenshots` (ocr_text, ocr_engine, ocr_pipeline_version)
-   ├──► SQLite FTS5 `screenshots_fts` (atomic sync)
-   └──► Stale Vector Invalidation ──► `GENERATE_TEXT_EMBEDDING` (Phase 3 refresh)
+   └── [Auto / Multilingual] ──► HybridOcrEngine
+                                  │
+                                  ▼
+                        DBNet Text Line Detector
+                                  │
+                                  ▼
+                           Text-line crops
+                                  │
+                                  ▼
+                       Windows OCR probe per crop
+                                  │
+                                  ▼
+                     Deterministic Line Classifier
+                                  │
+                  ┌───────────────┴───────────────┐
+                  ▼                               ▼
+       Technical / Uncertain                 Natural Text
+                  │                               │
+                  ▼                               ▼
+          KEEP Windows OCR             VietOCR VGG-Transformer
+                  │                               │
+                  └───────────────┬───────────────┘
+                                  ▼
+                         Reading-order merge
+                                  │
+                                  ▼
+                        Unicode NFC normalize
+                                  │
+                                  ▼
+                            OcrResult
+                                  │
+    ┌─────────────────────────────┼─────────────────────────────┐
+    ▼                             ▼                             ▼
+SQLite `screenshots`     SQLite FTS5 index            Stale vector invalidate
+(atomic metadata)         (searchable text)          (trigger semantic refresh)
 ```
 
 Phase 3 Hybrid Search Architecture:

@@ -402,26 +402,48 @@ Implement a two-stage hybrid ranker that unions the top 100 SQLite FTS5 candidat
 
 ---
 
-## ADR-018 — OCR Engine Router and Local Multilingual OCR Fallback
+## ADR-018 — OCR Engine Router and Multilingual Recognition Architecture
+
+**Status:** Superseded by ADR-019
+
+### Decision
+
+Implement an intelligent OCR Engine Router providing selectable routing modes (`Auto`, `Windows`, `Multilingual`). Note: Initial standalone PP-OCRv4 recognition was audited in Phase 3.5B and rejected due to poor Vietnamese fidelity (>100% CER). The DBNet detector was retained, while recognition was superseded by the hybrid per-line architecture in ADR-019.
+
+---
+
+## ADR-019 — Hybrid Per-Line OCR Router (Windows Media OCR + VietOCR ONNX)
 
 **Status:** Accepted
 
 ### Decision
 
-Implement an intelligent OCR Engine Router providing selectable routing modes (`Auto`, `Windows`, `Multilingual`) and integrate a high-accuracy local Multilingual OCR engine (PP-OCRv4 architecture, ~16 MB) as an offline fallback when native Windows OCR lacks the Vietnamese (`vi-VN`) language pack.
+Implement a per-text-line hybrid OCR engine combining native Windows Media OCR and local VietOCR VGG-Transformer ONNX, routed by a deterministic, lightweight line content classifier:
+1. **DBNet Text Detection:** PP-OCR DBNet (`ch_PP-OCRv4_det_infer.onnx`) detects text line bounding boxes with 55% vertical unclip expansion for tone marks and descenders.
+2. **Windows OCR Probe:** Windows Media OCR runs on each line crop in memory without disk I/O.
+3. **Deterministic Line Classifier:** Weighted scoring checks the Windows probe text for technical tokens (URLs, paths, error codes, identifiers, camelCase, syntax symbols).
+   - Technical or Uncertain lines $\to$ KEEP Windows Media OCR result.
+   - Natural Text lines $\to$ route to pure Rust VietOCR VGG-Transformer ONNX.
+4. **Reading-Order Merge & NFC Normalization:** Merged in vertical spatial order and normalized with Unicode NFC.
 
 ### Reasons
 
-- **Windows Host Deficiency:** Native Windows Media OCR without `vi-VN` corrupts Vietnamese diacritics (e.g. producing `"Tim kiém ånh chup män hinh"` instead of `"Tìm kiếm ảnh chụp màn hình"`), causing a 23.08% Character Error Rate (CER) and 100% Word Error Rate (WER). This directly degrades downstream FTS5 and semantic search.
-- **Zero Cloud & Zero LLM Rewrite Guarantee:** Cloud OCR services (Google Vision, Azure, OpenAI) and heuristic character-replacement tables (`toån` -> `toán`) are strictly rejected. Text extraction must reflect genuine, verifiable local model recognition.
-- **Zero Code Regression:** Technical tokens (`P2028`, `ERR_MODULE_NOT_FOUND`, `localhost:3000`) and terminal screenshots must not suffer accuracy regressions.
-- **Atomic Re-OCR Cascade with Failure Preservation:** Upgrading an OCR pipeline atomically updates `ocr_text` and `screenshots_fts` in a single transaction while invalidating stale `screenshot_embeddings` for regeneration. If re-OCR fails on an existing file, the existing usable OCR text and FTS index are strictly preserved.
+- **No Single Model Solves Both:** Windows Media OCR achieves 100% literal accuracy on technical code/URLs/stack traces but corrupts Vietnamese diacritics (25.91% CER, 84.75% WER). VietOCR VGG-Transformer achieves 8.83% CER on Vietnamese prose, but its autoregressive decoder hallucinates on arbitrary technical tokens (`localhost:3000`, `P2028`).
+- **Literal Safety Principle:** Conservative classifier favors Windows OCR when uncertain, ensuring technical tokens (`ERR_MODULE_NOT_FOUND`, `PrismaClientKnownRequestError`) are never corrupted.
+- **Pure Local Execution:** 100% in-process Rust execution via ONNX Runtime without Python or child processes.
+- **Empirically Proven Quality:**
+  - Vietnamese CER: **10.49%** (vs 25.91% Windows baseline).
+  - Vietnamese WER: **32.81%** (vs 84.75% Windows baseline).
+  - Technical Exact-Token Accuracy: **95.45%** (21/22 tokens).
+  - Classifier Technical Recall: **100.0%** (0 false negatives).
+  - Full screenshot latency: **~725 ms / screenshot**.
+  - Incremental RAM: **~233 MB**.
 
 ### Consequences
 
-- Screenshots with Vietnamese text achieve 0.0% CER and 0.0% WER when processed via the multilingual fallback.
-- Migration v5 persists `ocr_engine_version`, `ocr_language`, and `ocr_pipeline_version` for auditability and eligible re-processing.
-- Existing searches remain 100% functional even if the optional fallback model is not yet downloaded.
+- `HYBRID_OCR_QUALITY_APPROVED = true` is active.
+- Auto mode intelligently routes to Hybrid OCR when Windows lacks `vi-VN` and model assets are installed.
+- Search indexes achieve high recall on Vietnamese text while maintaining 100% safety on code and system errors.
 
 ---
 

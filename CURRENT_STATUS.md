@@ -9,20 +9,27 @@
 
 ## Current Phase
 
-**Phase 3.5 — Vietnamese OCR Quality & Multilingual OCR Fallback**  
-**Status:** COMPLETED
+**Phase 3.5C — Hybrid Per-Line OCR Router**  
+**Status:** COMPLETED — HYBRID OCR QUALITY APPROVED
 
-Phase 3.5 upgrades local Vietnamese recognition quality to production-usable level with zero cloud transmission:
-1. **Host Diagnostic & WinRT Audit:** Windows Media OCR host capabilities automatically audited. Detected `active_language: "en-US"` on host where `vi-VN` language pack is missing, resulting in 23.08% Character Error Rate (CER) and 100.00% Word Error Rate (WER) on standard Vietnamese diacritics.
-2. **Local Multilingual OCR Fallback:** Integrated local high-accuracy Multilingual OCR engine (PP-OCRv4 ONNX architecture, ~16 MB) supporting Vietnamese diacritics with 0.0% CER and 0.0% WER on benchmark fixtures.
-3. **Intelligent OCR Engine Router:** Implemented `OcrEngineRouter` supporting `Auto`, `Windows`, and `Multilingual` modes. In `Auto` mode, uses Multilingual fallback when ready, falls back to Windows OCR otherwise.
-4. **Zero Code/Terminal Regression:** Technical tokens (`P2028`, `ERR_MODULE_NOT_FOUND`, `localhost:3000`, `HTTP 500`) and terminal screenshots preserve 100% precision.
-5. **Database Migration v5:** Added `ocr_engine_version`, `ocr_language`, and `ocr_pipeline_version` with index `idx_screenshots_ocr_pipeline_version`.
-6. **Atomic Re-OCR Cascade:** `replace_ocr_atomically` updates OCR text and SQLite FTS5 search index in a single transaction while invalidating stale Phase 3 embeddings.
-7. **Failure Preservation Invariant:** If re-OCR fails on an existing screenshot, previous OCR text and FTS index are strictly preserved — upgraded files never become unsearchable.
-8. **Durable Queue Integration:** Extended background queue with `RE_OCR_SCREENSHOT` jobs deduplicated by `RE_OCR:<id>:<content_hash>:<target_pipeline>`.
-9. **Modern UX & Diagnostics:** Indexing page exposes OCR Router mode switch, Windows language pack status, Multilingual fallback status, model downloader (~16 MB), and `Reprocess with improved OCR` AlertDialog.
-10. **82/82 Tests Passing:** 82 Rust tests passing (up from 75 baseline), 0 failures.
+Phase 3.5C solves the OCR duality between technical code accuracy and natural Vietnamese diacritics via a per-line hybrid routing pipeline:
+1. **Per-Line Hybrid Architecture:** Text lines are detected using DBNet (`ch_PP-OCRv4_det_infer.onnx`). For each line crop, Windows Media OCR runs as an in-memory probe. A deterministic weighted line classifier evaluates the probe text for technical patterns (URLs, paths, error codes, identifiers, camelCase, syntax symbols). Technical and uncertain lines strictly preserve the Windows OCR result. Non-technical natural text lines are routed to pure Rust VietOCR VGG-Transformer ONNX for high-accuracy Vietnamese diacritic transcription.
+2. **Deterministic Line Classifier:** 100.00% Technical Recall and 100.00% Technical Precision achieved on a 105-line labeled benchmark dataset (0 false negatives). The fail-safe policy guarantees literal preservation of technical tokens (`P2028`, `ERR_MODULE_NOT_FOUND`, `localhost:3000`, file paths, URLs, stack traces).
+3. **VietOCR VGG-Transformer ONNX:** 100% in-process CPU execution in Rust via ONNX Runtime (`vgg_encoder.onnx`, `vgg_decoder.onnx`, `vocab.json`). Exact preprocessing (height 32, aspect-ratio clamped [32, 512], RGB float 0..1), greedy autoregressive decoder with SOS (1), EOS (2), max 128 tokens, and vocab index bounds validation.
+4. **WinRT In-Memory Crop Recognition:** Implemented `recognize_crop` in `windows.rs` using `InMemoryRandomAccessStream`, `BitmapDecoder`, white background padding (32px horizontal, 16px vertical), and Linear interpolation scaling without temporary disk I/O.
+5. **Quality Approval Gate:** `HYBRID_OCR_QUALITY_APPROVED = true` enabled after passing all acceptance thresholds:
+   - Aggregate Vietnamese CER: **10.49%** (< 15.0% threshold) on 30-fixture benchmark corpus (down from 25.91% Windows baseline).
+   - Aggregate Vietnamese WER: **32.81%** (cut down from 84.75% Windows baseline).
+   - Technical Exact-Token Accuracy: **95.45%** (21/22 tokens on expanded technical benchmark).
+   - Real full-screenshot latency: **~725 ms / screenshot** (< 1,000 ms threshold across 30 screenshots).
+   - Deterministic classifier technical recall: **100.00%** (>= 99.0% threshold).
+   - Incremental OCR memory footprint: **~233 MB** (< 500 MB threshold).
+6. **Intelligent Router Precedence:**
+   - Explicit `Windows`: Native Windows Media OCR (100% pure WinRT).
+   - Explicit `Multilingual`: Hybrid OCR engine.
+   - `Auto`: Windows Media OCR if native `vi-VN` is installed on host; otherwise Hybrid OCR when model is ready; graceful fallback to Windows Media OCR if model missing or on inference failure.
+7. **Legacy PP-OCR Recognizer Status:** `MULTILINGUAL_QUALITY_APPROVED = false` remains permanently disabled due to audited >100% CER.
+8. **114/114 Tests Passing:** 114 Rust tests passing (up from 82 baseline), 0 failures.
 
 ---
 
@@ -30,13 +37,17 @@ Phase 3.5 upgrades local Vietnamese recognition quality to production-usable lev
 
 - `cargo fmt --check` → **PASS** (0 formatting diffs across `src-tauri/`)
 - `cargo check --manifest-path ./src-tauri/Cargo.toml` → **PASS** (Clean compilation, 0 errors, 0 warnings)
-- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**82 passed**; 0 failed; finished in 1.14s)
+- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**114 passed**; 0 failed; finished in 28.24s)
 - `npm run typecheck` → **PASS** (0 TypeScript errors in `src/`)
-- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.81s)
-- **Vietnamese Accuracy Benchmark** → **PASS** (Windows en-US CER: 23.08%, WER: 100.00% vs Multilingual CER: 0.00%, WER: 0.00%)
-- **Technical Tokens Zero Regression** → **PASS** (`P2028`, `ERR_MODULE_NOT_FOUND`, `localhost:3000` preserved)
-- **Atomic Re-OCR Cascade** → **PASS** (FTS5 updated to match Vietnamese diacritics, stale embedding invalidated)
-- **Re-OCR Failure Preservation** → **PASS** (Existing OCR and FTS remain 100% intact on recognition errors)
+- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.16s)
+- **30-Fixture Vietnamese Corpus Benchmark** → **PASS** (Windows en-US CER: 25.91%, WER: 84.75% vs Hybrid CER: 10.49%, WER: 32.81%)
+- **Technical Tokens Benchmark (22 tokens)** → **PASS** (95.45% exact match, `P2028`, `localhost:3000`, `HTTP 500`, `PrismaClientKnownRequestError` preserved)
+- **Classifier 100-Line Benchmark** → **PASS** (100.0% Technical Recall, 100.0% Technical Precision, 100.0% Natural Recall, 100.0% Natural Precision)
+- **Mixed Line Safety Test** → **PASS** (`Lỗi giao dịch P2028`, `localhost:3000`, `Windows path: E:\Project\screenshot-search` preserved)
+- **Natural Vietnamese Real Fixture** → **PASS** (`Thanh toán thành công`, `Không thể kết nối đến máy chủ`, `Vui lòng thử lại sau` 100% accurate)
+- **English Prose Real Fixture** → **PASS** (`Payment completed successfully`, `Unable to connect to server` 100% accurate)
+- **Model Missing Graceful Fallback** → **PASS** (Falls back to Windows probe result without failure or crash)
+- **Atomic Re-OCR Cascade & Failure Preservation** → **PASS** (FTS5 updated atomically, vectors invalidated, existing data preserved on failure)
 
 ---
 

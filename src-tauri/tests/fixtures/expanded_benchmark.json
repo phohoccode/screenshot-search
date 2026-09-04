@@ -1,0 +1,34 @@
+[
+  {
+    "name": "technical_expanded.png",
+    "width": 1000,
+    "height": 850,
+    "font": "Segoe UI",
+    "size": 16,
+    "text": "P2028\nERR_MODULE_NOT_FOUND\nlocalhost:3000\nHTTP 500\nPrismaClientKnownRequestError\nnpm run build\npackage.json\n@tauri-apps/cli\n127.0.0.1\nC:\\Users\\Pho\nE:\\Project\\screenshot-search\nquery_engine-windows.dll.node\nnpx prisma generate\ncargo check\nnpm run tauri dev\nnode_modules/.prisma/client\nGET /api/products\nPOST /api/refunds\nTransaction already closed\nEPERM\nEADDRINUSE\nP3009"
+  },
+  {
+    "name": "mixed_expanded.png",
+    "width": 900,
+    "height": 360,
+    "font": "Segoe UI",
+    "size": 15,
+    "text": "Lỗi giao dịch P2028\nKhông thể kết nối localhost:3000\nLỗi HTTP 500 khi thanh toán\nKhông tìm thấy ERR_MODULE_NOT_FOUND\nPrismaClientKnownRequestError xảy ra khi giao dịch bị đóng\nWindows path: E:\\Project\\screenshot-search"
+  },
+  {
+    "name": "natural_vietnamese_expanded.png",
+    "width": 900,
+    "height": 400,
+    "font": "Segoe UI",
+    "size": 15,
+    "text": "Thanh toán thành công\nKhông thể kết nối đến máy chủ\nVui lòng thử lại sau\nHệ thống đang được bảo trì\nTìm kiếm ảnh chụp màn hình\nĐăng nhập để tiếp tục\nSản phẩm đã được thêm vào giỏ hàng"
+  },
+  {
+    "name": "english_prose_expanded.png",
+    "width": 800,
+    "height": 260,
+    "font": "Segoe UI",
+    "size": 15,
+    "text": "Payment completed successfully\nUnable to connect to server\nPlease try again later\nSystem maintenance in progress"
+  }
+]

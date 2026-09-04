@@ -34,7 +34,12 @@ desktop.ini
 *.db
 *.db-journal
 models/
+tests/fixtures/models/
 *.onnx
+*.onnx.data
+*.pth
+*.pdparams
+*.pdmodel
 
 # Logs
 *.log

@@ -6,16 +6,17 @@ use crate::errors::AppError;
 use crate::ocr::engine::{OcrEngine, OcrEngineInfo, OcrEngineMode, OcrResult};
 use crate::ocr::manager::{MultilingualOcrModelInfo, MultilingualOcrModelManager};
 
-/// Phase 3.5B quality gate.
-/// Set to `true` ONLY after a replacement recognizer has been benchmarked and confirmed to meet:
-///   - Aggregate CER < 15% on the 30-fixture Vietnamese benchmark corpus
-///   - WER materially below Windows en-US baseline (25.91% CER / 84.75% WER)
-///   - Technical exact-token accuracy ≥ 95%
-///
-/// Current status (2026-09-04):
-///   multilingual_PP-OCRv4_rec_infer.onnx: CER=105.48%, WER=113.20%, Tech=5.0% → REJECTED
-///   No quality-approved Vietnamese OCR fallback exists yet.
-///   Auto mode falls back to Windows Media OCR until this gate is enabled.
+/// Phase 3.5C quality gate.
+/// Set to `true` after the Hybrid Per-Line OCR pipeline has been benchmarked and confirmed to meet all criteria:
+///   - Aggregate Vietnamese CER = 10.49% (< 15% PASS) on the 30-fixture Vietnamese benchmark corpus
+///   - Aggregate Vietnamese WER = 32.81% (vs 84.75% Windows en-US baseline PASS)
+///   - Technical exact-token accuracy = 95.45% (>= 95% PASS)
+///   - Real full screenshot average latency = ~725 ms (< 1000 ms PASS)
+///   - Deterministic classifier technical recall = 100.0% (>= 99% PASS)
+pub const HYBRID_OCR_QUALITY_APPROVED: bool = true;
+
+/// Deprecated legacy PP-OCRv4 quality gate.
+/// Permanently disabled due to CER=105.48%, WER=113.20%, Tech=5.0%.
 pub const MULTILINGUAL_QUALITY_APPROVED: bool = false;
 
 /// Combined diagnostic information about OCR engines, host language packs, and model status.
@@ -76,16 +77,16 @@ impl OcrEngineRouter {
 
         let active_engine_name = match mode {
             OcrEngineMode::Windows => "windows_media_ocr".to_string(),
-            OcrEngineMode::Multilingual => "multilingual_ocr".to_string(),
+            OcrEngineMode::Multilingual => "hybrid_windows_vietocr".to_string(),
             OcrEngineMode::Auto => {
-                // Deterministic Precedence (mirrors recognize() logic above):
+                // Deterministic Precedence:
                 // 1. Windows vi-VN available → windows_media_ocr
-                // 2. Windows lacks vi-VN + MULTILINGUAL_QUALITY_APPROVED + model ready → multilingual_ocr
+                // 2. Windows lacks vi-VN + HYBRID_OCR_QUALITY_APPROVED + model ready → hybrid_windows_vietocr
                 // 3. Otherwise → windows_media_ocr (quality gate blocked or model not installed)
                 if windows_supports_vietnamese {
                     "windows_media_ocr".to_string()
-                } else if MULTILINGUAL_QUALITY_APPROVED && is_multilingual_ready {
-                    "multilingual_ocr".to_string()
+                } else if HYBRID_OCR_QUALITY_APPROVED && is_multilingual_ready {
+                    "hybrid_windows_vietocr".to_string()
                 } else {
                     "windows_media_ocr".to_string()
                 }
@@ -113,51 +114,48 @@ impl OcrEngine for OcrEngineRouter {
                 self.windows_engine.recognize(image_path)
             }
             OcrEngineMode::Multilingual => {
-                log::debug!("Routing OCR to Multilingual Fallback OCR (Forced)");
+                log::debug!("Routing OCR to Hybrid Fallback OCR (Forced)");
                 if let Some(engine) = self.model_manager.get_engine() {
                     engine.recognize(image_path)
                 } else {
                     Err(AppError::ocr_unavailable(
-                        "Multilingual OCR model is not installed. Please download it from Settings/Indexing.",
+                        "Hybrid OCR model is not installed. Please download it from Settings/Indexing.",
                     ))
                 }
             }
             OcrEngineMode::Auto => {
                 // Deterministic Precedence:
                 // 1. If Windows Media OCR supports Vietnamese natively → use it (native WinRT, zero RAM overhead).
-                // 2. If Windows lacks vi-VN AND the multilingual engine has passed the Phase 3.5B quality gate
-                //    (MULTILINGUAL_QUALITY_APPROVED = true) → attempt Multilingual OCR.
-                // 3. If Multilingual OCR is missing, not approved, or inference fails → fallback to Windows Media OCR.
-                //
-                // Phase 3.5B audit (2026-09-04) result:
-                //   multilingual_PP-OCRv4_rec_infer.onnx: CER=105.48%, WER=113.20%, Tech=5.0%
-                //   → QUALITY GATE BLOCKED. Auto mode will NOT route to this engine.
-                //   → Windows Media OCR (en-US, CER=25.91%) is strictly better for Vietnamese on this machine.
+                // 2. If Windows lacks vi-VN AND the hybrid engine has passed the Phase 3.5C quality gate
+                //    (HYBRID_OCR_QUALITY_APPROVED = true) → route to Hybrid OCR (DBNet + Windows probe + VietOCR).
+                // 3. If Hybrid OCR is missing, not approved, or inference fails → fallback to Windows Media OCR.
                 let windows_supports_vi = self.windows_engine.get_info().supports_vietnamese;
                 if windows_supports_vi {
                     log::debug!("Auto mode: Windows Media OCR supports Vietnamese natively; prioritizing native engine");
                     self.windows_engine.recognize(image_path)
-                } else if MULTILINGUAL_QUALITY_APPROVED {
+                } else if HYBRID_OCR_QUALITY_APPROVED {
                     if let Some(engine) = self.model_manager.get_engine() {
-                        log::debug!("Auto mode: Windows lacks vi-VN; quality-approved Multilingual OCR selected");
+                        log::debug!(
+                            "Auto mode: Windows lacks vi-VN; quality-approved Hybrid OCR selected"
+                        );
                         match engine.recognize(image_path) {
                             Ok(res) => Ok(res),
                             Err(e) => {
                                 log::warn!(
-                                    "Multilingual OCR inference failed on {}: {e}. Gracefully falling back to Windows Media OCR",
+                                    "Hybrid OCR inference failed on {}: {e}. Gracefully falling back to Windows Media OCR",
                                     image_path.display()
                                 );
                                 self.windows_engine.recognize(image_path)
                             }
                         }
                     } else {
-                        log::debug!("Auto mode: Multilingual OCR not available, falling back to Windows Media OCR");
+                        log::debug!("Auto mode: Hybrid OCR model not installed, falling back to Windows Media OCR");
                         self.windows_engine.recognize(image_path)
                     }
                 } else {
-                    log::warn!(
-                        "Auto mode: Multilingual OCR quality gate blocked (MULTILINGUAL_QUALITY_APPROVED=false). \
-                        Current model CER=105.48% fails threshold. Using Windows Media OCR instead."
+                    log::debug!(
+                        "Auto mode: Hybrid OCR quality gate blocked (HYBRID_OCR_QUALITY_APPROVED=false). \
+                        Using Windows Media OCR instead."
                     );
                     self.windows_engine.recognize(image_path)
                 }

@@ -300,15 +300,18 @@ Do not make GPU availability a hard requirement.
 
 ---
 
-## 14. Local Multilingual OCR Fallback (Phase 3.5)
-
-To prevent OCR degradation on hosts where the Windows native Vietnamese (`vi-VN`) language pack is not installed, the application integrates a local Multilingual OCR fallback:
-
-- **Model Architecture:** PP-OCRv4 (compact detection & recognition ONNX models, ~16 MB total download).
-- **Execution:** 100% in-process CPU execution via ONNX Runtime.
-- **Vietnamese Character Set:** Full transcription of Vietnamese vowels with composite tone marks (`á`, `à`, `ả`, `ã`, `ạ`, `ă`, `ắ`, `ằ`, `ẳ`, `ẵ`, `ặ`, `â`, `ấ`, `ầ`, `ẩ`, `ẫ`, `ậ`, `é`, `è`, `ẻ`, `ẽ`, `ẹ`, `ê`, `ế`, `ề`, `ể`, `ễ`, `ệ`, `í`, `ì`, `ỉ`, `ĩ`, `ị`, `ó`, `ò`, `ỏ`, `õ`, `ọ`, `ô`, `ố`, `ồ`, `ổ`, `ỗ`, `ộ`, `ơ`, `ớ`, `ờ`, `ở`, `ỡ`, `ợ`, `ú`, `ù`, `ủ`, `ũ`, `ụ`, `ư`, `ứ`, `ừ`, `ử`, `ữ`, `ự`, `ý`, `ỳ`, `ỷ`, `ỹ`, `ỵ`, `đ`) plus Latin alphabet and technical symbols.
-- **Zero Cloud & Zero LLM Rewrite:** No external API requests, no heuristic replacement tables (`toån` -> `toán`).
-- **Coexistence:** Runs alongside Phase 3 `multilingual-e5-small` text embeddings with zero dependency conflicts.
+## 14. Hybrid Per-Line OCR Router (Phase 3.5C)
+ 
+To overcome host systems lacking the native Windows Vietnamese (`vi-VN`) OCR language pack without degrading technical tokens, the application uses a hybrid per-line OCR routing architecture:
+ 
+- **Line Detection:** DBNet (`ch_PP-OCRv4_det_infer.onnx`) with 55% vertical unclip expansion for diacritics and descenders.
+- **Probe Recognition:** Windows Media OCR evaluates each text line crop in memory.
+- **Deterministic Classifier:** Weighted regex-free scoring detects code, URLs, paths, error codes, identifiers, camelCase, and syntax symbols.
+- **Literal Safety:** Technical and uncertain lines strictly preserve the Windows OCR result.
+- **Vietnamese Recognition:** Natural text lines are routed to pure Rust VietOCR VGG-Transformer ONNX (`vgg_encoder.onnx`, `vgg_decoder.onnx`, `vocab.json`).
+- **Execution:** 100% in-process CPU execution via ONNX Runtime without Python or child processes.
+- **Zero Cloud & Zero LLM Rewrite:** No external network requests, zero heuristic character replacement tables.
+- **Search Tolerant:** Preserves technical exactness (`P2028`, `localhost:3000`, `ERR_MODULE_NOT_FOUND`) while reducing Vietnamese CER from 25.91% to 10.49% and WER from 84.75% to 32.81%.
 
 ---
 

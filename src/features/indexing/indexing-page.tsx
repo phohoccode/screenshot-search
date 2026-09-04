@@ -463,7 +463,7 @@ export function IndexingPage() {
                     OCR Engine &amp; Vietnamese Recognition
                   </h2>
                   <p className="text-xs text-muted-foreground">
-                    Intelligent routing between native Windows Media OCR and local Multilingual fallback
+                    Uses Windows OCR for technical text and a local Vietnamese model for natural text.
                   </p>
                 </div>
               </div>
@@ -478,7 +478,7 @@ export function IndexingPage() {
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  Auto
+                  Auto (Recommended)
                 </button>
                 <button
                   type="button"
@@ -489,7 +489,7 @@ export function IndexingPage() {
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  Windows
+                  Windows Native
                 </button>
                 <button
                   type="button"
@@ -500,7 +500,7 @@ export function IndexingPage() {
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  Multilingual
+                  Hybrid Vietnamese
                 </button>
               </div>
             </div>
@@ -520,10 +520,10 @@ export function IndexingPage() {
                 </div>
 
                 <div className="flex items-center justify-between bg-muted/30 p-2.5 rounded border border-border/50">
-                  <span className="text-muted-foreground">Multilingual Fallback:</span>
+                  <span className="text-muted-foreground">Vietnamese OCR:</span>
                   {isMultilingualReady ? (
                     <span className="font-medium text-emerald-600 dark:text-emerald-400">
-                      Ready (PP-OCRv4)
+                      Ready — Hybrid local OCR
                     </span>
                   ) : isMultilingualDownloading ? (
                     <span className="font-medium text-primary flex items-center gap-1">
@@ -531,7 +531,7 @@ export function IndexingPage() {
                       Downloading
                     </span>
                   ) : (
-                    <span className="text-muted-foreground">Not installed</span>
+                    <span className="text-muted-foreground">Enhanced model not installed</span>
                   )}
                 </div>
               </div>
@@ -539,7 +539,7 @@ export function IndexingPage() {
               {!isMultilingualReady && (
                 <div className="flex items-center justify-between bg-primary/5 border border-primary/20 rounded-md p-3 text-xs">
                   <span className="text-muted-foreground">
-                    For high accuracy on Vietnamese screenshots and complex UI text, download the local multilingual model (~16 MB).
+                    Enhanced model not installed. Runs locally. Screenshots are never uploaded (~15 MB).
                   </span>
                   <Button
                     size="sm"
@@ -552,7 +552,7 @@ export function IndexingPage() {
                     ) : (
                       <Download className="h-3 w-3" />
                     )}
-                    Download Fallback (~16 MB)
+                    Download Vietnamese OCR Model
                   </Button>
                 </div>
               )}
@@ -587,11 +587,11 @@ export function IndexingPage() {
           <AlertDialog open={isReprocessDialogOpen} onOpenChange={setIsReprocessDialogOpen}>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>Reprocess screenshots with improved OCR?</AlertDialogTitle>
+                <AlertDialogTitle>Reprocess with improved OCR</AlertDialogTitle>
                 <AlertDialogDescription>
-                  This will re-run OCR for {reOcrEligibleCount} existing screenshot(s) using the improved engine.
-                  Text will be upgraded, the FTS index refreshed, and semantic embeddings regenerated.
-                  Original image files will not be modified.
+                  This will re-run OCR for existing screenshots using Hybrid OCR.
+                  Search text and semantic indexes will be refreshed.
+                  Original screenshots will not be modified.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
