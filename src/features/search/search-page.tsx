@@ -86,6 +86,7 @@ export function SearchPage() {
   const [selectedScreenshot, setSelectedScreenshot] = useState<ScreenshotDetail | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
+  const activeDetailRequestIdRef = useRef<number | null>(null);
 
   // Preview Modal Image Loading & Fallback State
   const [modalImageSrc, setModalImageSrc] = useState<string | null>(null);
@@ -239,13 +240,25 @@ export function SearchPage() {
     }
   };
 
-  // Open full preview modal
+  // Close full preview modal and clear state
+  const handleClosePreview = () => {
+    setIsPreviewOpen(false);
+    setSelectedScreenshot(null);
+    activeDetailRequestIdRef.current = null;
+  };
+
+  // Open full preview modal with stale request race protection
   const handleCardClick = async (item: SearchResultItem) => {
+    const requestId = item.id;
+    activeDetailRequestIdRef.current = requestId;
+    setSelectedScreenshot(null);
+    setIsPreviewOpen(true);
+    setCopiedText(false);
     try {
-      const detail = await getScreenshot(item.id);
-      setSelectedScreenshot(detail);
-      setIsPreviewOpen(true);
-      setCopiedText(false);
+      const detail = await getScreenshot(requestId);
+      if (activeDetailRequestIdRef.current === requestId) {
+        setSelectedScreenshot(detail);
+      }
     } catch (err) {
       console.error("Failed to fetch screenshot detail:", err);
     }
@@ -500,9 +513,15 @@ export function SearchPage() {
       </div>
 
       {/* Screenshot Preview Modal */}
-      <Dialog open={isPreviewOpen} onOpenChange={setIsPreviewOpen}>
+      <Dialog
+        open={isPreviewOpen}
+        onOpenChange={(open) => {
+          if (!open) handleClosePreview();
+          else setIsPreviewOpen(true);
+        }}
+      >
         <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col p-0 overflow-hidden">
-          {selectedScreenshot && (
+          {selectedScreenshot ? (
             <>
               {/* Modal Header */}
               <DialogHeader className="border-b border-border px-6 py-4">
@@ -657,13 +676,18 @@ export function SearchPage() {
                 <Button
                   variant="default"
                   size="sm"
-                  onClick={() => setIsPreviewOpen(false)}
+                  onClick={handleClosePreview}
                   className="text-xs"
                 >
                   Close
                 </Button>
               </DialogFooter>
             </>
+          ) : (
+            <div className="flex flex-col items-center justify-center p-16 gap-3">
+              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              <p className="text-xs text-muted-foreground">Loading screenshot details...</p>
+            </div>
           )}
         </DialogContent>
       </Dialog>

@@ -6,6 +6,18 @@ use crate::errors::AppError;
 use crate::ocr::engine::{OcrEngine, OcrEngineInfo, OcrEngineMode, OcrResult};
 use crate::ocr::manager::{MultilingualOcrModelInfo, MultilingualOcrModelManager};
 
+/// Phase 3.5B quality gate.
+/// Set to `true` ONLY after a replacement recognizer has been benchmarked and confirmed to meet:
+///   - Aggregate CER < 15% on the 30-fixture Vietnamese benchmark corpus
+///   - WER materially below Windows en-US baseline (25.91% CER / 84.75% WER)
+///   - Technical exact-token accuracy ≥ 95%
+///
+/// Current status (2026-09-04):
+///   multilingual_PP-OCRv4_rec_infer.onnx: CER=105.48%, WER=113.20%, Tech=5.0% → REJECTED
+///   No quality-approved Vietnamese OCR fallback exists yet.
+///   Auto mode falls back to Windows Media OCR until this gate is enabled.
+pub const MULTILINGUAL_QUALITY_APPROVED: bool = false;
+
 /// Combined diagnostic information about OCR engines, host language packs, and model status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,13 +78,13 @@ impl OcrEngineRouter {
             OcrEngineMode::Windows => "windows_media_ocr".to_string(),
             OcrEngineMode::Multilingual => "multilingual_ocr".to_string(),
             OcrEngineMode::Auto => {
-                // Deterministic Precedence:
-                // 1. If Windows Media OCR supports Vietnamese natively, prioritize it (native WinRT, zero RAM overhead)
-                // 2. If Windows lacks vi-VN and Multilingual OCR is ready, route to Multilingual (PP-OCRv4)
-                // 3. If Multilingual OCR is missing/not installed, fallback to Windows Media OCR
+                // Deterministic Precedence (mirrors recognize() logic above):
+                // 1. Windows vi-VN available → windows_media_ocr
+                // 2. Windows lacks vi-VN + MULTILINGUAL_QUALITY_APPROVED + model ready → multilingual_ocr
+                // 3. Otherwise → windows_media_ocr (quality gate blocked or model not installed)
                 if windows_supports_vietnamese {
                     "windows_media_ocr".to_string()
-                } else if is_multilingual_ready {
+                } else if MULTILINGUAL_QUALITY_APPROVED && is_multilingual_ready {
                     "multilingual_ocr".to_string()
                 } else {
                     "windows_media_ocr".to_string()
@@ -112,29 +124,40 @@ impl OcrEngine for OcrEngineRouter {
             }
             OcrEngineMode::Auto => {
                 // Deterministic Precedence:
-                // 1. If Windows Media OCR supports Vietnamese natively, prioritize it.
-                // 2. If Windows Media OCR lacks vi-VN and Multilingual OCR is ready, attempt Multilingual OCR.
-                // 3. If Multilingual OCR is missing, fallback to Windows Media OCR.
-                // 4. If Multilingual OCR inference fails, gracefully fallback to Windows Media OCR.
+                // 1. If Windows Media OCR supports Vietnamese natively → use it (native WinRT, zero RAM overhead).
+                // 2. If Windows lacks vi-VN AND the multilingual engine has passed the Phase 3.5B quality gate
+                //    (MULTILINGUAL_QUALITY_APPROVED = true) → attempt Multilingual OCR.
+                // 3. If Multilingual OCR is missing, not approved, or inference fails → fallback to Windows Media OCR.
+                //
+                // Phase 3.5B audit (2026-09-04) result:
+                //   multilingual_PP-OCRv4_rec_infer.onnx: CER=105.48%, WER=113.20%, Tech=5.0%
+                //   → QUALITY GATE BLOCKED. Auto mode will NOT route to this engine.
+                //   → Windows Media OCR (en-US, CER=25.91%) is strictly better for Vietnamese on this machine.
                 let windows_supports_vi = self.windows_engine.get_info().supports_vietnamese;
                 if windows_supports_vi {
                     log::debug!("Auto mode: Windows Media OCR supports Vietnamese natively; prioritizing native engine");
                     self.windows_engine.recognize(image_path)
-                } else if let Some(engine) = self.model_manager.get_engine() {
-                    log::debug!("Auto mode: Windows lacks vi-VN; attempting Multilingual OCR");
-                    match engine.recognize(image_path) {
-                        Ok(res) => Ok(res),
-                        Err(e) => {
-                            log::warn!(
-                                "Multilingual OCR inference failed on {}: {e}. Gracefully falling back to Windows Media OCR",
-                                image_path.display()
-                            );
-                            self.windows_engine.recognize(image_path)
+                } else if MULTILINGUAL_QUALITY_APPROVED {
+                    if let Some(engine) = self.model_manager.get_engine() {
+                        log::debug!("Auto mode: Windows lacks vi-VN; quality-approved Multilingual OCR selected");
+                        match engine.recognize(image_path) {
+                            Ok(res) => Ok(res),
+                            Err(e) => {
+                                log::warn!(
+                                    "Multilingual OCR inference failed on {}: {e}. Gracefully falling back to Windows Media OCR",
+                                    image_path.display()
+                                );
+                                self.windows_engine.recognize(image_path)
+                            }
                         }
+                    } else {
+                        log::debug!("Auto mode: Multilingual OCR not available, falling back to Windows Media OCR");
+                        self.windows_engine.recognize(image_path)
                     }
                 } else {
-                    log::debug!(
-                        "Auto mode: Multilingual OCR not available, falling back to Windows Media OCR"
+                    log::warn!(
+                        "Auto mode: Multilingual OCR quality gate blocked (MULTILINGUAL_QUALITY_APPROVED=false). \
+                        Current model CER=105.48% fails threshold. Using Windows Media OCR instead."
                     );
                     self.windows_engine.recognize(image_path)
                 }

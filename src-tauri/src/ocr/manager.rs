@@ -27,6 +27,9 @@ pub const DET_MODEL_SHA256: &str =
     "69ce850fec741a2a4568c7c924bb025c9d4f1129e5f96ab428c799ccc5ef2275";
 pub const REC_MODEL_SHA256: &str =
     "ad7dd55f6759fa02333bff6eb179a4f51be5b89cbe6f710249c95f47d0211350";
+pub const KEYS_URL: &str =
+    "https://huggingface.co/cycloneboy/ch_PP-OCRv4_rec_infer/resolve/main/ch_dict.txt";
+pub const KEYS_SHA256: &str = "b22996db93ffedffa90abf62009659af14ae22df06a2da5a1ce0e6fb1117af86";
 
 /// High-level status of the local multilingual OCR model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -93,6 +96,16 @@ impl MultilingualOcrModelManager {
             models_dir: PathBuf::from("mock_ocr_models"),
             status: Arc::new(RwLock::new(MultilingualOcrStatus::Ready)),
             engine: Arc::new(RwLock::new(Some(engine))),
+            is_downloading: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Creates a manager in `NotInstalled` state with no engine (used for testing Scenario 3).
+    pub fn new_empty_for_test() -> Arc<Self> {
+        Arc::new(Self {
+            models_dir: PathBuf::from("mock_ocr_models"),
+            status: Arc::new(RwLock::new(MultilingualOcrStatus::NotInstalled)),
+            engine: Arc::new(RwLock::new(None)),
             is_downloading: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -196,14 +209,12 @@ impl MultilingualOcrModelManager {
             self.models_dir.display()
         );
 
-        // 1. Keys dictionary with Vietnamese character mapping
+        // 1. Keys character dictionary for PP-OCRv4 recognition
         *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 10.0 };
         let keys_target = self.models_dir.join(KEYS_FILENAME);
         let keys_tmp = self.models_dir.join(format!("{KEYS_FILENAME}.tmp"));
-        let keys_bytes = crate::ocr::multilingual::VIETNAMESE_KEYS_DICTIONARY.as_bytes();
-        let expected_keys_hash =
-            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(keys_bytes));
-        verify_and_install_asset(keys_bytes, &expected_keys_hash, &keys_target, &keys_tmp)?;
+        let keys_bytes = crate::ocr::multilingual::DEFAULT_KEYS_DICT.as_bytes();
+        verify_and_install_asset(keys_bytes, KEYS_SHA256, &keys_target, &keys_tmp)?;
 
         // 2. Detection ONNX model
         *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 45.0 };
