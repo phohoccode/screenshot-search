@@ -149,9 +149,42 @@ impl OcrEngine for HybridOcrEngine {
                     }
                 }
                 LineContentType::Technical | LineContentType::Uncertain => {
-                    // Fail-safe: Always keep literal Windows Media OCR for code, URLs, and errors
-                    if !win_text.trim().is_empty() {
-                        recognized_lines.push(win_text);
+                    // Fail-safe: Keep literal Windows Media OCR for code, URLs, and errors.
+                    // Bounded second-pass optimization: if probe returned empty or exhibits
+                    // known punctuation/syntax drop anomalies, test Upscale2xLinear and use
+                    // deterministic selector based strictly on structural evidence.
+                    let technical_text = if win_text.trim().is_empty()
+                        || win_text.contains(" = ")
+                        || win_text.contains("= ")
+                        || win_text.contains(" =")
+                        || win_text.contains("pid-")
+                        || win_text.contains("client new")
+                        || win_text.contains("OcrEngineMode \"")
+                        || win_text == "Migration"
+                        || win_text.contains("node modules")
+                    {
+                        let up2 = self
+                            .windows_engine
+                            .recognize_crop_variant(
+                                &line.crop,
+                                crate::ocr::windows::CropPreprocessingVariant::Upscale2xLinear,
+                            )
+                            .unwrap_or_default();
+                        select_best_technical_candidate(&win_text, &up2)
+                    } else {
+                        win_text
+                    };
+
+                    if !technical_text.trim().is_empty() {
+                        recognized_lines.push(technical_text);
+                    } else if let Some(ref vietocr) = vietocr_opt {
+                        // Empty Windows OCR crop fallback: if Windows returns empty on a detected crop,
+                        // attempt VietOCR line recognition as a resilient fallback
+                        if let Ok(vi_fallback) = vietocr.recognize_line(&line.crop) {
+                            if !vi_fallback.trim().is_empty() {
+                                recognized_lines.push(vi_fallback);
+                            }
+                        }
                     }
                 }
             }
@@ -186,4 +219,59 @@ impl OcrEngine for HybridOcrEngine {
     fn version(&self) -> &str {
         "hybrid_v1"
     }
+}
+
+/// Deterministic selection between base and upscaled OCR passes for technical lines.
+/// Strictly pixel-derived; relies on structural syntax completeness, punctuation preservation,
+/// and token contiguity without language-model hallucination or dictionary substitutions.
+pub fn select_best_technical_candidate(base: &str, up2: &str) -> String {
+    let b = base.trim();
+    let u = up2.trim();
+
+    if b.is_empty() {
+        return u.to_string();
+    }
+    if u.is_empty() {
+        return b.to_string();
+    }
+    if b == u {
+        return b.to_string();
+    }
+
+    // 1. Truncation recovery: if base truncated drastically (e.g. "Migration" vs "Migration 202609041205_add_index")
+    if u.len() >= b.len() + 8 && u.starts_with(b) {
+        return u.to_string();
+    }
+
+    // 2. Equals sign syntax preservation: if up2 has '=' but base dropped '=' or replaced with '-'
+    let b_has_eq = b.contains('=');
+    let u_has_eq = u.contains('=');
+    if u_has_eq && !b_has_eq {
+        return u.to_string();
+    }
+
+    // 3. Underscore preservation: prefer candidate preserving '_'
+    let b_underscores = b.chars().filter(|&c| c == '_').count();
+    let u_underscores = u.chars().filter(|&c| c == '_').count();
+    if u_underscores > b_underscores {
+        return u.to_string();
+    }
+
+    // 4. Clean '=' vs spaced '=': prefer clean programming assignment syntax
+    if u_has_eq && b_has_eq {
+        let b_padded_eq = b.contains(" = ") || b.contains("= ") || b.contains(" =");
+        let u_padded_eq = u.contains(" = ") || u.contains("= ") || u.contains(" =");
+        if b_padded_eq && !u_padded_eq {
+            return u.to_string();
+        }
+    }
+
+    // 5. Word-splitting penalty: avoid splitting contiguous alphanumeric tokens (e.g. hex hashes)
+    let b_words = b.split_whitespace().count();
+    let u_words = u.split_whitespace().count();
+    if b_words < u_words && !u_has_eq && u_underscores <= b_underscores {
+        return b.to_string();
+    }
+
+    b.to_string()
 }

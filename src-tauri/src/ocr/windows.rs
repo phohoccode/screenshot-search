@@ -4,6 +4,19 @@ use super::engine::{OcrEngine, OcrEngineInfo, OcrResult};
 use super::normalize::normalize_ocr_text;
 use crate::errors::AppError;
 
+/// Preprocessing variants for text line crop recognition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CropPreprocessingVariant {
+    CurrentBaseline,
+    GenerousPadding,
+    Upscale2xNearest,
+    Upscale2xLinear,
+    Upscale2xFant,
+    Upscale3xLinear,
+    GrayscaleContrast,
+    GrayscaleContrastUpscale2x,
+}
+
 /// Local OCR engine utilizing the built-in Windows 10/11 WinRT OCR APIs (Windows.Media.Ocr).
 /// Pre-initializes and reuses the native engine instance, safely downscaling oversized
 /// screenshots (e.g. 4K, ultra-wide) in-memory before recognition without modifying disk files.
@@ -105,8 +118,17 @@ impl WindowsMediaOcrEngine {
         }
     }
 
-    /// Performs in-memory OCR recognition on a cropped text line image without disk I/O.
+    /// Performs in-memory OCR recognition on a cropped text line image using default baseline settings.
     pub fn recognize_crop(&self, crop: &image::RgbImage) -> Result<String, AppError> {
+        self.recognize_crop_variant(crop, CropPreprocessingVariant::CurrentBaseline)
+    }
+
+    /// Performs in-memory OCR recognition on a cropped text line image with selectable preprocessing variant.
+    pub fn recognize_crop_variant(
+        &self,
+        crop: &image::RgbImage,
+        variant: CropPreprocessingVariant,
+    ) -> Result<String, AppError> {
         #[cfg(target_os = "windows")]
         {
             use windows::Graphics::Imaging::{
@@ -126,17 +148,52 @@ impl WindowsMediaOcrEngine {
                 return Ok(String::new());
             }
 
-            // WinRT OCR performs significantly better when there is sufficient padding/margin
-            // around the text line, preventing boundary character truncation and false rejections.
-            let pad_x = 32u32;
-            let pad_y = 16u32;
+            // 1. Contrast / Grayscale preprocessing if requested
+            let working_crop = match variant {
+                CropPreprocessingVariant::GrayscaleContrast
+                | CropPreprocessingVariant::GrayscaleContrastUpscale2x => {
+                    let mut min_l = 255u8;
+                    let mut max_l = 0u8;
+                    for p in crop.pixels() {
+                        let l =
+                            (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) as u8;
+                        min_l = min_l.min(l);
+                        max_l = max_l.max(l);
+                    }
+                    let mut processed = crop.clone();
+                    if max_l > min_l {
+                        let range = (max_l - min_l) as f32;
+                        for p in processed.pixels_mut() {
+                            let l = (0.299 * p[0] as f32
+                                + 0.587 * p[1] as f32
+                                + 0.114 * p[2] as f32) as u8;
+                            let stretched =
+                                (((l.saturating_sub(min_l)) as f32 / range) * 255.0).round() as u8;
+                            *p = image::Rgb([stretched, stretched, stretched]);
+                        }
+                    }
+                    std::borrow::Cow::Owned(processed)
+                }
+                _ => std::borrow::Cow::Borrowed(crop),
+            };
+
+            // 2. Padding
+            let (pad_x, pad_y) = match variant {
+                CropPreprocessingVariant::GenerousPadding => (48u32, 24u32),
+                _ => (32u32, 16u32),
+            };
             let padded_w = w + pad_x * 2;
             let padded_h = h + pad_y * 2;
             let mut padded =
                 image::RgbImage::from_pixel(padded_w, padded_h, image::Rgb([255, 255, 255]));
-            image::imageops::overlay(&mut padded, crop, pad_x as i64, pad_y as i64);
+            image::imageops::overlay(
+                &mut padded,
+                working_crop.as_ref(),
+                pad_x as i64,
+                pad_y as i64,
+            );
 
-            // Encode padded crop to PNG in memory
+            // 3. Encode padded crop to PNG in memory
             let mut png_bytes = Vec::new();
             let mut cursor = std::io::Cursor::new(&mut png_bytes);
             padded
@@ -179,12 +236,45 @@ impl WindowsMediaOcrEngine {
                 .BitmapAlphaMode()
                 .map_err(|e| AppError::ocr_decode(e.to_string()))?;
 
-            // Upscale small text line crops (original h < 36px) with Linear interpolation
-            // so text features (descenders on 'j'/'p', crossbars on 'T', dots) are clearly resolved by WinRT OCR.
-            let bitmap = if h < 36 {
-                let scale = (36.0 / (h as f64)).max(1.75);
-                let target_w = ((padded_w as f64) * scale).round() as u32;
-                let target_h = ((padded_h as f64) * scale).round() as u32;
+            // 4. Scaling transform setup based on variant
+            let (need_scale, scale_factor, interp_mode) = match variant {
+                CropPreprocessingVariant::CurrentBaseline => {
+                    if h < 36 {
+                        (
+                            true,
+                            (36.0 / (h as f64)).max(1.75),
+                            BitmapInterpolationMode::Linear,
+                        )
+                    } else {
+                        (false, 1.0, BitmapInterpolationMode::Linear)
+                    }
+                }
+                CropPreprocessingVariant::GenerousPadding => {
+                    (false, 1.0, BitmapInterpolationMode::Linear)
+                }
+                CropPreprocessingVariant::Upscale2xNearest => {
+                    (true, 2.0, BitmapInterpolationMode::NearestNeighbor)
+                }
+                CropPreprocessingVariant::Upscale2xLinear => {
+                    (true, 2.0, BitmapInterpolationMode::Linear)
+                }
+                CropPreprocessingVariant::Upscale2xFant => {
+                    (true, 2.0, BitmapInterpolationMode::Fant)
+                }
+                CropPreprocessingVariant::Upscale3xLinear => {
+                    (true, 3.0, BitmapInterpolationMode::Linear)
+                }
+                CropPreprocessingVariant::GrayscaleContrast => {
+                    (false, 1.0, BitmapInterpolationMode::Linear)
+                }
+                CropPreprocessingVariant::GrayscaleContrastUpscale2x => {
+                    (true, 2.0, BitmapInterpolationMode::Fant)
+                }
+            };
+
+            let bitmap = if need_scale {
+                let target_w = ((padded_w as f64) * scale_factor).round() as u32;
+                let target_h = ((padded_h as f64) * scale_factor).round() as u32;
 
                 let transform = BitmapTransform::new().map_err(|e| {
                     AppError::ocr_decode(format!("Failed to create BitmapTransform: {e}"))
@@ -195,11 +285,9 @@ impl WindowsMediaOcrEngine {
                 transform.SetScaledHeight(target_h).map_err(|e| {
                     AppError::ocr_decode(format!("Failed to set scaled height: {e}"))
                 })?;
-                transform
-                    .SetInterpolationMode(BitmapInterpolationMode::Linear)
-                    .map_err(|e| {
-                        AppError::ocr_decode(format!("Failed to set interpolation mode: {e}"))
-                    })?;
+                transform.SetInterpolationMode(interp_mode).map_err(|e| {
+                    AppError::ocr_decode(format!("Failed to set interpolation mode: {e}"))
+                })?;
 
                 decoder
                     .GetSoftwareBitmapTransformedAsync(
@@ -249,6 +337,7 @@ impl WindowsMediaOcrEngine {
         #[cfg(not(target_os = "windows"))]
         {
             let _ = crop;
+            let _ = variant;
             Ok(String::new())
         }
     }

@@ -9,27 +9,21 @@
 
 ## Current Phase
 
-**Phase 3.5C — Hybrid Per-Line OCR Router**  
-**Status:** COMPLETED — HYBRID OCR QUALITY APPROVED
+**Phase 3.5D — Technical OCR Robustness & Performance Hardening**  
+**Status:** PARTIALLY COMPLETED — TECHNICAL OCR QUALITY GATE NOT MET
 
-Phase 3.5C solves the OCR duality between technical code accuracy and natural Vietnamese diacritics via a per-line hybrid routing pipeline:
-1. **Per-Line Hybrid Architecture:** Text lines are detected using DBNet (`ch_PP-OCRv4_det_infer.onnx`). For each line crop, Windows Media OCR runs as an in-memory probe. A deterministic weighted line classifier evaluates the probe text for technical patterns (URLs, paths, error codes, identifiers, camelCase, syntax symbols). Technical and uncertain lines strictly preserve the Windows OCR result. Non-technical natural text lines are routed to pure Rust VietOCR VGG-Transformer ONNX for high-accuracy Vietnamese diacritic transcription.
-2. **Deterministic Line Classifier:** 100.00% Technical Recall and 100.00% Technical Precision achieved on a 105-line labeled benchmark dataset (0 false negatives). The fail-safe policy guarantees literal preservation of technical tokens (`P2028`, `ERR_MODULE_NOT_FOUND`, `localhost:3000`, file paths, URLs, stack traces).
-3. **VietOCR VGG-Transformer ONNX:** 100% in-process CPU execution in Rust via ONNX Runtime (`vgg_encoder.onnx`, `vgg_decoder.onnx`, `vocab.json`). Exact preprocessing (height 32, aspect-ratio clamped [32, 512], RGB float 0..1), greedy autoregressive decoder with SOS (1), EOS (2), max 128 tokens, and vocab index bounds validation.
-4. **WinRT In-Memory Crop Recognition:** Implemented `recognize_crop` in `windows.rs` using `InMemoryRandomAccessStream`, `BitmapDecoder`, white background padding (32px horizontal, 16px vertical), and Linear interpolation scaling without temporary disk I/O.
-5. **Quality Approval Gate:** `HYBRID_OCR_QUALITY_APPROVED = true` enabled after passing all acceptance thresholds:
-   - Aggregate Vietnamese CER: **10.49%** (< 15.0% threshold) on 30-fixture benchmark corpus (down from 25.91% Windows baseline).
-   - Aggregate Vietnamese WER: **32.81%** (cut down from 84.75% Windows baseline).
-   - Technical Exact-Token Accuracy: **95.45%** (21/22 tokens on expanded technical benchmark).
-   - Real full-screenshot latency: **~725 ms / screenshot** (< 1,000 ms threshold across 30 screenshots).
-   - Deterministic classifier technical recall: **100.00%** (>= 99.0% threshold).
-   - Incremental OCR memory footprint: **~233 MB** (< 500 MB threshold).
-6. **Intelligent Router Precedence:**
-   - Explicit `Windows`: Native Windows Media OCR (100% pure WinRT).
-   - Explicit `Multilingual`: Hybrid OCR engine.
-   - `Auto`: Windows Media OCR if native `vi-VN` is installed on host; otherwise Hybrid OCR when model is ready; graceful fallback to Windows Media OCR if model missing or on inference failure.
-7. **Legacy PP-OCR Recognizer Status:** `MULTILINGUAL_QUALITY_APPROVED = false` remains permanently disabled due to audited >100% CER.
-8. **114/114 Tests Passing:** 114 Rust tests passing (up from 82 baseline), 0 failures.
+1. **Failure Attribution & Diagnostics:** 100% of technical token recognition failures on the 52-token holdout were isolated to Windows Media OCR (0 detection failures from DBNet, 0 crop extraction errors). Primary error classes: sans-serif glyph ambiguity (`I` vs `l`, `0` vs `O`), low-baseline underscore conversion to space, and syntax drop (`=`, `-`).
+2. **Local Technical Recognizer Audit:** Evaluated lightweight Latin and English CTC ONNX models (`latin_PP-OCRv3`, `en_PP-OCRv4`, `en_PP-OCRv3`, `en_PP-OCRv5`). All candidates were rejected due to poor literal accuracy (42.3%–55.8% exact on the 52-token holdout), severely underperforming Windows OCR (73.1%–82.7%).
+3. **Bounded Deterministic Multi-Pass Selector:** Implemented `select_best_technical_candidate` evaluating baseline and `Upscale2xLinear` variants. Raised 52-token exact match from 73.08% to 82.69% and search-normalized from 88.46% to 90.38% (recovering `redis://127.0.0.1:6379`, `status=502`, `pid=14092`, `const client = new RedisClient();`, `export type OcrEngineMode = "Auto";`).
+4. **New Independent Technical Holdout (102 tokens):** Evaluated 102 unseen technical tokens across 21 categories: achieved 62.75% exact match (64/102) and 83.33% search-normalized (85/102).
+5. **Quality Gate Assessment:**
+   - Vietnamese CER: **10.07%** (Gate < 15.0% **PASSED**).
+   - Incremental OCR RAM: **172.73 MB** (Gate < 500 MB **PASSED**).
+   - Classifier Independent Technical Recall: **100.00%** (Gate >= 99.0% **PASSED**).
+   - Technical Exact Match: **82.69%** on 52-set / **62.75%** on 102-set (Gate >= 95.0% **NOT MET**).
+   - Technical Search-Normalized: **90.38%** on 52-set / **83.33%** on 102-set (Gate >= 98.0% **NOT MET**).
+   - Pipeline Latency: Pure technical screenshots execute in **~624 ms** (< 1s); natural/mixed screenshots average **3.23s** due to sequential VietOCR Transformer autoregression.
+6. **130/130 Tests Passing:** All unit, integration, and regression suites passing. Production paths strictly free of mock engines; 100% pixel-derived OCR without dictionary or LLM corrections.
 
 ---
 
