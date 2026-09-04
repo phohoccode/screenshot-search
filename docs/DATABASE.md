@@ -179,9 +179,10 @@ CREATE INDEX IF NOT EXISTS idx_screenshots_ocr_pipeline_version
 ```
 
 Properties:
-- **`ocr_engine_version`:** Identifies specific engine build (`winrt_v1`, `ppocr_v4`).
+- **`ocr_engine_version`:** Identifies the specific engine build (`winrt_v1`, `hybrid_v2`).
 - **`ocr_language`:** Records detected or used language tag (`en-US`, `vi-VN`, etc.).
-- **`ocr_pipeline_version`:** Composite identifier (e.g. `windows_media_ocr:winrt_v1` or `multilingual_ocr:ppocr_v4`) used by `get_re_ocr_eligible_count` to detect screenshots indexed with older/lower quality pipelines.
+- **`ocr_pipeline_version`:** Composite identifier (for example `windows_media_ocr:winrt_v1` or `hybrid_windows_vietocr:hybrid_v2`) used by `get_re_ocr_eligible_count` to detect screenshots indexed with older/lower-quality pipelines. The value must be derived from the engine that the router will actually use; successful OCR persists the engine and version returned by that engine.
+- **Durable re-OCR target:** The target pipeline is embedded in each `RE_OCR` dedupe key. If that pipeline is temporarily unavailable while a local model loads, the worker preserves the existing OCR/FTS state and uses the normal recoverable retry path rather than persisting a lower-quality fallback.
 
 ---
 

@@ -307,6 +307,21 @@ fn process_re_ocr_job(
         AppError::file_not_found(format!("Screenshot ID {screenshot_id} not found"))
     })?;
 
+    // A durable re-OCR job may survive an app restart while the requested local
+    // model is still loading asynchronously. Do not silently downgrade that job
+    // to the router's temporary Windows fallback. Preserve the existing OCR/FTS
+    // and let the normal recoverable retry path wait for the requested pipeline.
+    let target_pipeline = re_ocr_target_pipeline(&job.dedupe_key);
+    if let Some(target) = target_pipeline {
+        let info = engine.get_info();
+        let active_pipeline = format!("{}:{}", info.engine_name, info.engine_version);
+        if active_pipeline != target {
+            return Err(AppError::ocr_unavailable(format!(
+                "Re-OCR target pipeline {target} is not ready; active pipeline is {active_pipeline}"
+            )));
+        }
+    }
+
     // 1. Run new OCR outside DB lock
     let ocr_res = match engine.recognize(path_obj) {
         Ok(res) => res,
@@ -322,6 +337,14 @@ fn process_re_ocr_job(
 
     let ocr_text = normalize_ocr_text(&ocr_res.text);
     let pipeline_version = format!("{}:{}", ocr_res.engine, ocr_res.engine_version);
+
+    if let Some(target) = target_pipeline {
+        if pipeline_version != target {
+            return Err(AppError::ocr_unavailable(format!(
+                "Re-OCR produced pipeline {pipeline_version}, but the durable job requires {target}"
+            )));
+        }
+    }
 
     // 2. Atomically update OCR text, FTS index, and invalidate stale embedding
     screenshots::replace_ocr_atomically(
@@ -358,6 +381,17 @@ fn process_re_ocr_job(
         ocr_res.engine
     );
     Ok(Some(screenshot_id))
+}
+
+fn re_ocr_target_pipeline(dedupe_key: &str) -> Option<&str> {
+    let mut parts = dedupe_key.splitn(4, ':');
+    if parts.next()? != "RE_OCR" {
+        return None;
+    }
+    parts.next()?;
+    parts.next()?;
+    let target = parts.next()?;
+    (!target.is_empty()).then_some(target)
 }
 
 /// Executes a single index job step with OCR and optional semantic model manager.
@@ -492,4 +526,22 @@ pub fn run_indexing_worker_loop(
     }
 
     log::info!("Background indexing worker stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::re_ocr_target_pipeline;
+
+    #[test]
+    fn durable_re_ocr_key_preserves_full_target_pipeline() {
+        assert_eq!(
+            re_ocr_target_pipeline("RE_OCR:42:abc123:hybrid_windows_vietocr:hybrid_v2"),
+            Some("hybrid_windows_vietocr:hybrid_v2")
+        );
+        assert_eq!(
+            re_ocr_target_pipeline("re_ocr:42:legacy"),
+            None,
+            "legacy test keys must remain backward compatible"
+        );
+    }
 }

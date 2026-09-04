@@ -9,6 +9,8 @@ use crate::ocr::normalize::normalize_ocr_text;
 use crate::ocr::vietocr::VietOcrOnnxRecognizer;
 use crate::ocr::windows::WindowsMediaOcrEngine;
 
+pub const HYBRID_ENGINE_VERSION: &str = "hybrid_v2";
+
 /// Hybrid Per-Line OCR Engine combining:
 /// - DBNet Text Line Detector (PP-OCRv4)
 /// - Windows Media OCR (literal probe & technical recognition)
@@ -28,7 +30,7 @@ impl HybridOcrEngine {
     ) -> Self {
         let info = OcrEngineInfo {
             engine_name: "hybrid_windows_vietocr".to_string(),
-            engine_version: "hybrid_v1".to_string(),
+            engine_version: HYBRID_ENGINE_VERSION.to_string(),
             active_language: "mixed/vi-en".to_string(),
             available_languages: vec!["vi-VN".to_string(), "en-US".to_string()],
             supports_vietnamese: true,
@@ -217,7 +219,7 @@ impl OcrEngine for HybridOcrEngine {
     }
 
     fn version(&self) -> &str {
-        "hybrid_v1"
+        HYBRID_ENGINE_VERSION
     }
 }
 

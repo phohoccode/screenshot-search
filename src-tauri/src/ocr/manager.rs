@@ -13,7 +13,7 @@ use crate::ocr::vietocr::VietOcrOnnxRecognizer;
 use crate::ocr::windows::WindowsMediaOcrEngine;
 
 pub const DEFAULT_OCR_MODEL_ID: &str = "multilingual-ocr";
-pub const DEFAULT_OCR_MODEL_VERSION: &str = "hybrid_v1";
+pub const DEFAULT_OCR_MODEL_VERSION: &str = crate::ocr::hybrid::HYBRID_ENGINE_VERSION;
 pub const APPROXIMATE_OCR_MODEL_SIZE_MB: usize = 158;
 
 /// Remote model asset definitions with sha256 checksums.

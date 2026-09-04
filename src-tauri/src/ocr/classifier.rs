@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 /// Classification of a detected text line's content for hybrid OCR routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +32,16 @@ impl LineContentClassifier {
         // 1. Strong Technical Disqualifiers (immediate Technical classification)
         if Self::has_strong_technical_pattern(trimmed) {
             return LineContentType::Technical;
+        }
+
+        // Windows en-US OCR commonly represents Vietnamese tone/shape marks as
+        // Latin letters carrying non-Vietnamese combining marks (for example,
+        // diaeresis or ring-above). This is a structural Unicode corruption
+        // signal, not a phrase or heading dictionary. Strong technical syntax
+        // above always takes precedence, and all-uppercase text is excluded so
+        // plain technical status headings retain the conservative path.
+        if Self::has_windows_ocr_diacritic_corruption_signal(trimmed) {
+            return LineContentType::Natural;
         }
 
         // 2. Compute weighted technical and natural scores
@@ -192,6 +203,46 @@ impl LineContentClassifier {
         false
     }
 
+    fn has_windows_ocr_diacritic_corruption_signal(text: &str) -> bool {
+        let words = text.split_whitespace().count();
+        let letter_count = text.chars().filter(|c| c.is_alphabetic()).count();
+        if words < 2 || letter_count < 6 {
+            return false;
+        }
+
+        let has_lowercase = text.chars().any(|c| c.is_lowercase());
+        if !has_lowercase {
+            return false;
+        }
+
+        text.chars().any(Self::has_non_vietnamese_latin_mark)
+    }
+
+    fn has_non_vietnamese_latin_mark(c: char) -> bool {
+        if c.is_ascii() || !c.is_alphabetic() {
+            return false;
+        }
+
+        let decomposed: Vec<char> = c.to_string().nfd().collect();
+        if decomposed.len() < 2 || !decomposed[0].is_ascii_alphabetic() {
+            return false;
+        }
+
+        decomposed[1..].iter().any(|mark| {
+            !matches!(
+                *mark,
+                '\u{0300}' // grave
+                    | '\u{0301}' // acute
+                    | '\u{0302}' // circumflex
+                    | '\u{0303}' // tilde
+                    | '\u{0306}' // breve
+                    | '\u{0309}' // hook above
+                    | '\u{031b}' // horn
+                    | '\u{0323}' // dot below
+            )
+        })
+    }
+
     /// Evaluates weighted scores based on token density, character types, and identifiers.
     fn compute_scores(text: &str) -> (i32, i32) {
         let mut tech_score = 0;
@@ -334,7 +385,21 @@ impl LineContentClassifier {
                 return true;
             }
         }
-        text.contains(r"\\")
+
+        // Windows OCR can drop the first path segment or insert whitespace
+        // after a drive marker while retaining later separators. Keep these
+        // partially corrupted paths on the literal technical recognizer.
+        let starts_with_drive = {
+            let mut chars = text.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some(drive), Some(':')) if drive.is_ascii_alphabetic()
+            )
+        };
+        let separator_count = text.chars().filter(|c| *c == '\\' || *c == '/').count();
+
+        (starts_with_drive && separator_count >= 1)
+            || separator_count >= 2
             || text.contains(r"\Users\")
             || text.contains(r"\Project\")
             || text.contains(r"\AppData\")
@@ -591,5 +656,75 @@ mod tests {
             LineContentClassifier::classify("Không tìm thấy ERR_MODULE_NOT_FOUND"),
             LineContentType::Natural
         );
+    }
+
+    #[test]
+    fn test_structural_windows_vietnamese_corruption_signal() {
+        assert_eq!(
+            LineContentClassifier::classify("DANG NÄNGCÄp"),
+            LineContentType::Natural
+        );
+        assert_eq!(
+            LineContentClassifier::classify("THONG BÄo HÉ THÖNG"),
+            LineContentType::Natural
+        );
+        assert_eq!(
+            LineContentClassifier::classify("THdl GIAN KIEN HOÄN TÄT"),
+            LineContentType::Natural
+        );
+        assert_eq!(
+            LineContentClassifier::classify("lüc 23:47 22 thång 8, 2026"),
+            LineContentType::Natural
+        );
+
+        // Technical syntax wins before the corruption signal.
+        assert_eq!(
+            LineContentClassifier::classify(r"C:\Äpp\build.exe"),
+            LineContentType::Technical
+        );
+        assert_eq!(
+            LineContentClassifier::classify(r"C: nguröi düng>\pictures\screenshots"),
+            LineContentType::Technical
+        );
+        assert_eq!(
+            LineContentClassifier::classify("BUILD FÄILED"),
+            LineContentType::Uncertain
+        );
+    }
+
+    #[test]
+    fn test_uppercase_technical_prose_remains_conservative() {
+        let lines = [
+            "BUILD FAILED",
+            "ACCESS DENIED",
+            "DATABASE ERROR",
+            "CONNECTION RESET",
+            "INVALID TOKEN",
+            "SERVER ERROR",
+            "REQUEST TIMEOUT",
+            "MIGRATION FAILED",
+            "INTERNAL SERVER ERROR",
+            "TRANSACTION ABORTED",
+            "NETWORK UNREACHABLE",
+            "PERMISSION DENIED",
+            "RESOURCE EXHAUSTED",
+            "SERVICE UNAVAILABLE",
+            "MEMORY OVERFLOW",
+            "DEADLOCK DETECTED",
+            "COMPILATION FAILED",
+            "AUTHENTICATION FAILED",
+            "DEADLOCK",
+            "OVERFLOW",
+            "SEGFAULT",
+            "UNREACHABLE",
+        ];
+
+        for line in lines {
+            assert_ne!(
+                LineContentClassifier::classify(line),
+                LineContentType::Natural,
+                "technical status line must not route to VietOCR: {line}"
+            );
+        }
     }
 }

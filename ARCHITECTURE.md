@@ -44,7 +44,7 @@ Persistence
 SQLite + FTS5
 ```
 
-Phase 3.5C Hybrid Per-Line OCR Architecture:
+Phase 3.5E Hybrid Per-Line OCR Architecture (`hybrid_v2`):
 
 ```text
 Screenshot File
@@ -66,7 +66,9 @@ OcrEngineRouter (Auto / Windows / Multilingual)
                        Windows OCR probe per crop
                                   │
                                   ▼
-                     Deterministic Line Classifier
+             Deterministic Line Classifier
+        (technical syntax first; structural Unicode
+          corruption signal for Windows Vietnamese)
                                   │
                   ┌───────────────┴───────────────┐
                   ▼                               ▼

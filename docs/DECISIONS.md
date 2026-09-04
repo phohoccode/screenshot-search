@@ -447,6 +447,41 @@ Implement a per-text-line hybrid OCR engine combining native Windows Media OCR a
 
 ---
 
+## ADR-020 — Structural Windows OCR Corruption Signal and Hybrid v2 Versioning
+
+**Status:** Accepted
+
+### Decision
+
+Keep the ADR-019 per-line Hybrid OCR architecture and add one bounded classifier signal for real Windows `en-US` corruption of Vietnamese text. After all strong technical syntax guards run, classify a multi-word lowercase-containing probe as Natural when an extended Latin letter decomposes into an ASCII base plus a combining mark that is not valid in Vietnamese orthography (for example diaeresis or ring-above substitutions produced by Windows OCR).
+
+Technical patterns remain authoritative. Drive paths, URLs, code/error identifiers, command syntax, and other strong structures are evaluated before the corruption signal. The Hybrid engine version advances to `hybrid_v2`, and re-OCR commands derive their target pipeline from actual router diagnostics.
+
+### Reasons
+
+- Across more than 20 real lines from several local screenshots, Windows OCR repeatedly returned structurally invalid diacritic substitutions while VietOCR recognized the same complete crops correctly.
+- DBNet boxes and crop padding were visually sound on the failing headings, date, button, and body lines, so replacing the detector or recognition model was not justified.
+- The signal describes Unicode structure rather than known Vietnamese phrases, screenshot names, or expected output, so it generalizes without benchmark leakage.
+- An independent classifier holdout retained 100% technical recall, and all 22 uppercase technical phrases remained Technical or Uncertain.
+
+### Consequences
+
+- Real Vietnamese headings and prose corrupted by the Windows probe route to the existing local VietOCR recognizer.
+- No new model, network inference, phrase dictionary, or screenshot-specific branch is introduced; incremental model memory is zero.
+- `hybrid_windows_vietocr:hybrid_v2` identifies the upgraded pipeline so durable re-OCR can atomically refresh OCR text, FTS5, and stale embedding state.
+- Durable re-OCR verifies that both the ready engine and the produced result match the job's target pipeline. A model-loading race therefore retries without replacing the previous OCR/FTS data with a temporary Windows fallback.
+- Phase 3.5D technical recognition limits remain unchanged; this decision does not claim to solve Windows glyph ambiguity.
+
+### Alternatives considered
+
+- **All-uppercase text implies Natural:** Rejected because uppercase build, database, network, and authentication errors are common technical content.
+- **Vietnamese phrase dictionary or output correction:** Rejected as brittle benchmark leakage and prohibited pixel-to-text substitution.
+- **Always run both recognizers for Uncertain lines:** Rejected because evidence showed a reliable bounded routing signal and dual VietOCR inference would materially increase latency and technical hallucination risk.
+- **Global crop padding or resizing:** Rejected after bounded tests; a few individual lines improved, but the unchanged 30-fixture aggregate was worse than classifier-only routing and other lines regressed.
+- **Another OCR model:** Rejected because VietOCR already recognized the same problematic crops well.
+
+---
+
 ## ADR Template
 
 Use this template for future decisions.
@@ -469,4 +504,3 @@ Consequences:
 Alternatives considered:
 ...
 ```
-

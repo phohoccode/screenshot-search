@@ -171,9 +171,16 @@ pub fn run_ocr_batch(
             match recognition_result {
                 Ok(res) => {
                     let normalized_text = normalize_ocr_text(&res.text);
-                    if let Err(e) =
-                        screenshots::save_ocr_success(&conn, item.id, &normalized_text, &res.engine)
-                    {
+                    let pipeline_version = format!("{}:{}", res.engine, res.engine_version);
+                    if let Err(e) = screenshots::save_ocr_success_with_metadata(
+                        &conn,
+                        item.id,
+                        &normalized_text,
+                        &res.engine,
+                        Some(&res.engine_version),
+                        res.language.as_deref(),
+                        Some(&pipeline_version),
+                    ) {
                         log::warn!("Failed to save OCR success for {}: {e}", item.path);
                         failed += 1;
                     } else {

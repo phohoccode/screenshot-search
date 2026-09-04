@@ -8,6 +8,33 @@ use crate::ocr::engine::{OcrEngine, OcrEngineInfo};
 use crate::ocr::orchestrator::{run_ocr_batch, OcrBatchSummary, OcrManager};
 use crate::ocr::windows::WindowsMediaOcrEngine;
 
+fn target_pipeline_version(diagnostics: &crate::ocr::router::OcrEngineDiagnostics) -> String {
+    let windows_pipeline = || {
+        format!(
+            "{}:{}",
+            diagnostics.windows_info.engine_name, diagnostics.windows_info.engine_version
+        )
+    };
+    let hybrid_pipeline = || {
+        format!(
+            "hybrid_windows_vietocr:{}",
+            diagnostics.multilingual_info.model_version
+        )
+    };
+
+    match diagnostics.mode {
+        crate::ocr::engine::OcrEngineMode::Windows => windows_pipeline(),
+        crate::ocr::engine::OcrEngineMode::Multilingual => hybrid_pipeline(),
+        crate::ocr::engine::OcrEngineMode::Auto => {
+            if diagnostics.windows_supports_vietnamese || !diagnostics.is_multilingual_ready {
+                windows_pipeline()
+            } else {
+                hybrid_pipeline()
+            }
+        }
+    }
+}
+
 /// Event payload emitted to the frontend during OCR indexing.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -204,13 +231,9 @@ pub fn get_ocr_engine_stats(
         .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
     let diagnostics = router.get_diagnostics();
-    let target_pipeline = if diagnostics.is_multilingual_ready {
-        "multilingual_ocr:ppocr_v4"
-    } else {
-        "windows_media_ocr:winrt_v1"
-    };
+    let target_pipeline = target_pipeline_version(&diagnostics);
 
-    screenshots::get_ocr_engine_stats(&conn, target_pipeline)
+    screenshots::get_ocr_engine_stats(&conn, &target_pipeline)
 }
 
 /// Returns the count of screenshots eligible for re-OCR with an improved engine.
@@ -225,13 +248,9 @@ pub fn get_re_ocr_eligible_count(
         .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
     let diagnostics = router.get_diagnostics();
-    let target_pipeline = if diagnostics.is_multilingual_ready {
-        "multilingual_ocr:ppocr_v4"
-    } else {
-        "windows_media_ocr:winrt_v1"
-    };
+    let target_pipeline = target_pipeline_version(&diagnostics);
 
-    screenshots::get_re_ocr_eligible_count(&conn, target_pipeline)
+    screenshots::get_re_ocr_eligible_count(&conn, &target_pipeline)
 }
 
 /// Enqueues eligible screenshots for background re-OCR with the improved OCR engine.
@@ -247,17 +266,7 @@ pub fn reprocess_screenshots_with_improved_ocr(
         .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
     let diagnostics = router.get_diagnostics();
-    let target_pipeline = match diagnostics.mode {
-        crate::ocr::engine::OcrEngineMode::Windows => "windows_media_ocr:winrt_v1".to_string(),
-        crate::ocr::engine::OcrEngineMode::Multilingual => "multilingual_ocr:ppocr_v4".to_string(),
-        crate::ocr::engine::OcrEngineMode::Auto => {
-            if diagnostics.is_multilingual_ready {
-                "multilingual_ocr:ppocr_v4".to_string()
-            } else {
-                "windows_media_ocr:winrt_v1".to_string()
-            }
-        }
-    };
+    let target_pipeline = target_pipeline_version(&diagnostics);
 
     let eligible = screenshots::get_re_ocr_eligible_screenshots(
         &conn,
@@ -286,4 +295,83 @@ pub fn reprocess_screenshots_with_improved_ocr(
 
     log::info!("Enqueued {enqueued} screenshots for re-OCR with target pipeline {target_pipeline}");
     Ok(enqueued)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ocr::engine::{OcrEngineInfo, OcrEngineMode};
+    use crate::ocr::manager::{MultilingualOcrModelInfo, MultilingualOcrStatus};
+    use crate::ocr::router::OcrEngineDiagnostics;
+
+    fn diagnostics(
+        mode: OcrEngineMode,
+        windows_supports_vietnamese: bool,
+        is_multilingual_ready: bool,
+    ) -> OcrEngineDiagnostics {
+        OcrEngineDiagnostics {
+            mode,
+            active_engine_name: String::new(),
+            windows_info: OcrEngineInfo {
+                engine_name: "windows_media_ocr".to_string(),
+                engine_version: "winrt_v1".to_string(),
+                active_language: "en-US".to_string(),
+                available_languages: vec!["en-US".to_string()],
+                supports_vietnamese: windows_supports_vietnamese,
+                max_image_dimension: 10_000,
+            },
+            multilingual_info: MultilingualOcrModelInfo {
+                model_id: "multilingual-ocr".to_string(),
+                model_version: crate::ocr::hybrid::HYBRID_ENGINE_VERSION.to_string(),
+                status: if is_multilingual_ready {
+                    MultilingualOcrStatus::Ready
+                } else {
+                    MultilingualOcrStatus::NotInstalled
+                },
+                is_available: is_multilingual_ready,
+                approximate_size_mb: 158,
+            },
+            windows_supports_vietnamese,
+            is_multilingual_ready,
+        }
+    }
+
+    #[test]
+    fn target_pipeline_matches_actual_router_output() {
+        let forced_windows = diagnostics(OcrEngineMode::Windows, false, true);
+        assert_eq!(
+            target_pipeline_version(&forced_windows),
+            "windows_media_ocr:winrt_v1"
+        );
+
+        let forced_hybrid = diagnostics(OcrEngineMode::Multilingual, false, true);
+        assert_eq!(
+            target_pipeline_version(&forced_hybrid),
+            format!(
+                "hybrid_windows_vietocr:{}",
+                crate::ocr::hybrid::HYBRID_ENGINE_VERSION
+            )
+        );
+
+        let hybrid = diagnostics(OcrEngineMode::Auto, false, true);
+        assert_eq!(
+            target_pipeline_version(&hybrid),
+            format!(
+                "hybrid_windows_vietocr:{}",
+                crate::ocr::hybrid::HYBRID_ENGINE_VERSION
+            )
+        );
+
+        let native_vietnamese = diagnostics(OcrEngineMode::Auto, true, true);
+        assert_eq!(
+            target_pipeline_version(&native_vietnamese),
+            "windows_media_ocr:winrt_v1"
+        );
+
+        let missing_model = diagnostics(OcrEngineMode::Auto, false, false);
+        assert_eq!(
+            target_pipeline_version(&missing_model),
+            "windows_media_ocr:winrt_v1"
+        );
+    }
 }
