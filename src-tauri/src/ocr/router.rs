@@ -66,7 +66,13 @@ impl OcrEngineRouter {
             OcrEngineMode::Windows => "windows_media_ocr".to_string(),
             OcrEngineMode::Multilingual => "multilingual_ocr".to_string(),
             OcrEngineMode::Auto => {
-                if is_multilingual_ready {
+                // Deterministic Precedence:
+                // 1. If Windows Media OCR supports Vietnamese natively, prioritize it (native WinRT, zero RAM overhead)
+                // 2. If Windows lacks vi-VN and Multilingual OCR is ready, route to Multilingual (PP-OCRv4)
+                // 3. If Multilingual OCR is missing/not installed, fallback to Windows Media OCR
+                if windows_supports_vietnamese {
+                    "windows_media_ocr".to_string()
+                } else if is_multilingual_ready {
                     "multilingual_ocr".to_string()
                 } else {
                     "windows_media_ocr".to_string()
@@ -105,17 +111,22 @@ impl OcrEngine for OcrEngineRouter {
                 }
             }
             OcrEngineMode::Auto => {
-                // Auto mode logic:
-                // If multilingual model is installed and ready, use it for optimal Vietnamese & mixed quality.
-                // If not installed, transparently use native Windows OCR.
-                // If multilingual OCR fails on an image, safely fallback to Windows OCR.
-                if let Some(engine) = self.model_manager.get_engine() {
-                    log::debug!("Auto mode: attempting Multilingual OCR");
+                // Deterministic Precedence:
+                // 1. If Windows Media OCR supports Vietnamese natively, prioritize it.
+                // 2. If Windows Media OCR lacks vi-VN and Multilingual OCR is ready, attempt Multilingual OCR.
+                // 3. If Multilingual OCR is missing, fallback to Windows Media OCR.
+                // 4. If Multilingual OCR inference fails, gracefully fallback to Windows Media OCR.
+                let windows_supports_vi = self.windows_engine.get_info().supports_vietnamese;
+                if windows_supports_vi {
+                    log::debug!("Auto mode: Windows Media OCR supports Vietnamese natively; prioritizing native engine");
+                    self.windows_engine.recognize(image_path)
+                } else if let Some(engine) = self.model_manager.get_engine() {
+                    log::debug!("Auto mode: Windows lacks vi-VN; attempting Multilingual OCR");
                     match engine.recognize(image_path) {
                         Ok(res) => Ok(res),
                         Err(e) => {
                             log::warn!(
-                                "Multilingual OCR failed on {}: {e}. Falling back to Windows Media OCR",
+                                "Multilingual OCR inference failed on {}: {e}. Gracefully falling back to Windows Media OCR",
                                 image_path.display()
                             );
                             self.windows_engine.recognize(image_path)
@@ -123,7 +134,7 @@ impl OcrEngine for OcrEngineRouter {
                     }
                 } else {
                     log::debug!(
-                        "Auto mode: Multilingual OCR not available, using Windows Media OCR"
+                        "Auto mode: Multilingual OCR not available, falling back to Windows Media OCR"
                     );
                     self.windows_engine.recognize(image_path)
                 }
@@ -143,10 +154,13 @@ impl OcrEngine for OcrEngineRouter {
                 }
             }
             OcrEngineMode::Auto => {
-                if let Some(engine) = self.model_manager.get_engine() {
+                let windows_info = self.windows_engine.get_info();
+                if windows_info.supports_vietnamese {
+                    windows_info
+                } else if let Some(engine) = self.model_manager.get_engine() {
                     engine.get_info()
                 } else {
-                    self.windows_engine.get_info()
+                    windows_info
                 }
             }
         }

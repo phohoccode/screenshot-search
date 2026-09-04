@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -18,6 +17,16 @@ pub const APPROXIMATE_OCR_MODEL_SIZE_MB: usize = 16;
 pub const DET_MODEL_FILENAME: &str = "ch_PP-OCRv4_det_infer.onnx";
 pub const REC_MODEL_FILENAME: &str = "multilingual_PP-OCRv4_rec_infer.onnx";
 pub const KEYS_FILENAME: &str = "keys.txt";
+
+pub const DET_MODEL_URL: &str =
+    "https://huggingface.co/cycloneboy/ch_PP-OCRv4_det_infer/resolve/main/model.onnx";
+pub const REC_MODEL_URL: &str =
+    "https://huggingface.co/cycloneboy/ch_PP-OCRv4_rec_infer/resolve/main/model.onnx";
+
+pub const DET_MODEL_SHA256: &str =
+    "69ce850fec741a2a4568c7c924bb025c9d4f1129e5f96ab428c799ccc5ef2275";
+pub const REC_MODEL_SHA256: &str =
+    "ad7dd55f6759fa02333bff6eb179a4f51be5b89cbe6f710249c95f47d0211350";
 
 /// High-level status of the local multilingual OCR model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -182,54 +191,37 @@ impl MultilingualOcrModelManager {
     fn perform_download(&self) -> Result<(), AppError> {
         let _ = fs::create_dir_all(&self.models_dir);
 
-        // Download detection model, recognition model, and keys dictionary
-        // In this local-first design, models are fetched over secure HTTPS and verified
         log::info!(
             "Downloading multilingual OCR model files to {}",
             self.models_dir.display()
         );
 
-        // Update progress
-        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 25.0 };
-
-        let det_target = self.models_dir.join(DET_MODEL_FILENAME);
-        let rec_target = self.models_dir.join(REC_MODEL_FILENAME);
+        // 1. Keys dictionary with Vietnamese character mapping
+        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 10.0 };
         let keys_target = self.models_dir.join(KEYS_FILENAME);
+        let keys_tmp = self.models_dir.join(format!("{KEYS_FILENAME}.tmp"));
+        let keys_bytes = crate::ocr::multilingual::VIETNAMESE_KEYS_DICTIONARY.as_bytes();
+        let expected_keys_hash =
+            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(keys_bytes));
+        verify_and_install_asset(keys_bytes, &expected_keys_hash, &keys_target, &keys_tmp)?;
 
-        // Ensure keys dictionary exists with full Vietnamese character support
-        if !keys_target.exists() {
-            let keys_tmp = self.models_dir.join(format!("{KEYS_FILENAME}.tmp"));
-            let mut f = File::create(&keys_tmp).map_err(|e| AppError::io(e.to_string()))?;
-            f.write_all(crate::ocr::multilingual::VIETNAMESE_KEYS_DICTIONARY.as_bytes())
-                .map_err(|e| AppError::io(e.to_string()))?;
-            f.flush().map_err(|e| AppError::io(e.to_string()))?;
-            let _ = fs::rename(&keys_tmp, &keys_target);
-        }
-
-        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 50.0 };
-
-        // Ensure detection and recognition placeholder/weights files are created cleanly
+        // 2. Detection ONNX model
+        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 45.0 };
+        let det_target = self.models_dir.join(DET_MODEL_FILENAME);
         if !det_target.exists() {
-            let det_tmp = self.models_dir.join(format!("{DET_MODEL_FILENAME}.tmp"));
-            let mut f = File::create(&det_tmp).map_err(|e| AppError::io(e.to_string()))?;
-            f.write_all(b"ONNX_DET_PPOCR_V4")
-                .map_err(|e| AppError::io(e.to_string()))?;
-            let _ = fs::rename(&det_tmp, &det_target);
+            download_and_verify_asset(DET_MODEL_URL, DET_MODEL_SHA256, &det_target)?;
         }
 
-        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 80.0 };
-
+        // 3. Recognition ONNX model
+        *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 85.0 };
+        let rec_target = self.models_dir.join(REC_MODEL_FILENAME);
         if !rec_target.exists() {
-            let rec_tmp = self.models_dir.join(format!("{REC_MODEL_FILENAME}.tmp"));
-            let mut f = File::create(&rec_tmp).map_err(|e| AppError::io(e.to_string()))?;
-            f.write_all(b"ONNX_REC_PPOCR_V4")
-                .map_err(|e| AppError::io(e.to_string()))?;
-            let _ = fs::rename(&rec_tmp, &rec_target);
+            download_and_verify_asset(REC_MODEL_URL, REC_MODEL_SHA256, &rec_target)?;
         }
 
         *self.status.write().unwrap() = MultilingualOcrStatus::Downloading { percent: 100.0 };
         log::info!(
-            "Multilingual OCR assets installed at {}",
+            "Multilingual OCR assets verified and atomically installed at {}",
             self.models_dir.display()
         );
 
@@ -254,4 +246,104 @@ impl MultilingualOcrModelManager {
             approximate_size_mb: APPROXIMATE_OCR_MODEL_SIZE_MB,
         }
     }
+}
+
+/// Streams bytes from reader into temporary path, calculates SHA-256 in flight,
+/// verifies integrity against expected checksum, and atomically swaps to final target path.
+/// If verification fails or download is aborted, the temp file is removed and target is untouched.
+pub fn verify_and_install_asset<R: std::io::Read>(
+    mut reader: R,
+    expected_sha256: &str,
+    target_path: &Path,
+    tmp_path: &Path,
+) -> Result<(), AppError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    let mut hasher = Sha256::new();
+    let mut file = File::create(tmp_path).map_err(|e| {
+        AppError::io(format!(
+            "Failed to create temporary download file {}: {e}",
+            tmp_path.display()
+        ))
+    })?;
+
+    let mut buf = [0u8; 32768];
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| {
+            let _ = fs::remove_file(tmp_path);
+            AppError::io(format!(
+                "Error reading stream for {}: {e}",
+                target_path.display()
+            ))
+        })?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        file.write_all(&buf[..n]).map_err(|e| {
+            let _ = fs::remove_file(tmp_path);
+            AppError::io(format!("Error writing to temporary download file: {e}"))
+        })?;
+    }
+
+    file.flush().map_err(|e| {
+        let _ = fs::remove_file(tmp_path);
+        AppError::io(format!("Failed to flush temporary download file: {e}"))
+    })?;
+    drop(file);
+
+    let computed_hash = format!("{:x}", hasher.finalize());
+    if !expected_sha256.is_empty() && !computed_hash.eq_ignore_ascii_case(expected_sha256) {
+        let _ = fs::remove_file(tmp_path);
+        return Err(AppError::unknown(format!(
+            "Checksum mismatch for {}: expected {}, computed {}. Download rejected.",
+            target_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            expected_sha256,
+            computed_hash
+        )));
+    }
+
+    // Atomic installation: rename tmp to target
+    fs::rename(tmp_path, target_path).map_err(|e| {
+        let _ = fs::remove_file(tmp_path);
+        AppError::io(format!(
+            "Failed to atomically install asset to {}: {e}",
+            target_path.display()
+        ))
+    })?;
+
+    Ok(())
+}
+
+/// Downloads asset from fixed HTTPS URL, verifies SHA-256 integrity, and atomically installs it.
+pub fn download_and_verify_asset(
+    url: &str,
+    expected_sha256: &str,
+    target_path: &Path,
+) -> Result<(), AppError> {
+    let tmp_path = target_path.with_extension("tmp");
+    log::info!(
+        "Downloading asset from {} to {}",
+        url,
+        target_path.display()
+    );
+
+    let response = ureq::get(url)
+        .header("User-Agent", "ScreenshotSearch-ModelDownloader/1.0")
+        .call()
+        .map_err(|e| AppError::unknown(format!("Failed to download {url}: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(AppError::unknown(format!(
+            "Download failed for {url}: HTTP status {}",
+            response.status().as_u16()
+        )));
+    }
+
+    let mut reader = response.into_body().into_reader();
+    verify_and_install_asset(&mut reader, expected_sha256, target_path, &tmp_path)
 }

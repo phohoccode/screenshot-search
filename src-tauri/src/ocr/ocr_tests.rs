@@ -1008,6 +1008,7 @@ mod tests {
             .expect("Screenshot missing");
         assert_eq!(detail.ocr_text.as_deref(), Some("Thanh toán thành công"));
         assert_eq!(detail.ocr_engine.as_deref(), Some("multilingual_ocr"));
+        assert_eq!(detail.ocr_engine_version.as_deref(), Some("ppocr_v4"));
         assert_eq!(detail.ocr_language.as_deref(), Some("vi-VN"));
         assert_eq!(
             detail.ocr_pipeline_version.as_deref(),
@@ -1111,5 +1112,467 @@ mod tests {
         // Attempting to load missing engine returns typed error, does not panic
         let load_res = manager.load_local_engine();
         assert!(load_res.is_err());
+    }
+
+    // ============================================================================
+    // AUDIT: AUTO PRECEDENCE REGRESSION TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_router_auto_precedence_windows_vi_available_multilingual_ready() {
+        use crate::ocr::engine::{OcrEngine, OcrEngineMode};
+        use crate::ocr::manager::MultilingualOcrModelManager;
+        use crate::ocr::mock::MockOcrEngine;
+        use crate::ocr::multilingual::MultilingualOcrEngine;
+        use crate::ocr::router::OcrEngineRouter;
+
+        // Case 1: Windows OCR supports Vietnamese (vi-VN pack installed) + Multilingual ready
+        let mock_windows = Arc::new(MockOcrEngine::new_with_vietnamese(
+            "Windows vi-VN Native Output",
+            true,
+        ));
+        let mock_multilingual = Arc::new(MultilingualOcrEngine::new_mock());
+        let model_mgr = MultilingualOcrModelManager::with_engine(mock_multilingual);
+        let router = OcrEngineRouter::new(mock_windows, model_mgr);
+
+        router.set_mode(OcrEngineMode::Auto);
+        let diag = router.get_diagnostics();
+        assert_eq!(
+            diag.active_engine_name, "windows_media_ocr",
+            "Auto mode must prioritize native Windows OCR when vi-VN is supported"
+        );
+
+        let p_vi = get_fixture_path("vietnamese.png");
+        let res = router.recognize(&p_vi).expect("Recognition failed");
+        assert_eq!(res.engine, "mock_ocr");
+        assert!(res.text.contains("Windows vi-VN Native Output"));
+    }
+
+    #[test]
+    fn test_router_auto_precedence_windows_vi_missing_multilingual_ready() {
+        use crate::ocr::engine::{OcrEngine, OcrEngineMode};
+        use crate::ocr::manager::MultilingualOcrModelManager;
+        use crate::ocr::mock::MockOcrEngine;
+        use crate::ocr::multilingual::MultilingualOcrEngine;
+        use crate::ocr::router::OcrEngineRouter;
+
+        // Case 2: Windows OCR lacks vi-VN + Multilingual ready -> must route to Multilingual
+        let mock_windows = Arc::new(MockOcrEngine::new_with_vietnamese(
+            "Corrupted Windows en-US Output",
+            false,
+        ));
+        let mock_multilingual = Arc::new(MultilingualOcrEngine::new_mock());
+        let model_mgr = MultilingualOcrModelManager::with_engine(mock_multilingual);
+        let router = OcrEngineRouter::new(mock_windows, model_mgr);
+
+        router.set_mode(OcrEngineMode::Auto);
+        let diag = router.get_diagnostics();
+        assert_eq!(
+            diag.active_engine_name, "multilingual_ocr",
+            "Auto mode must select Multilingual OCR when host Windows lacks vi-VN"
+        );
+
+        let p_vi = get_fixture_path("vietnamese.png");
+        let res = router.recognize(&p_vi).expect("Recognition failed");
+        assert_eq!(res.engine, "multilingual_ocr");
+        assert!(res.text.contains("Tìm kiếm ảnh chụp màn hình"));
+    }
+
+    #[test]
+    fn test_router_auto_precedence_multilingual_missing() {
+        use crate::ocr::engine::{OcrEngine, OcrEngineMode};
+        use crate::ocr::manager::MultilingualOcrModelManager;
+        use crate::ocr::mock::MockOcrEngine;
+        use crate::ocr::router::OcrEngineRouter;
+        use tempfile::tempdir;
+
+        // Case 3: Multilingual model not installed -> fallback to Windows OCR
+        let temp = tempdir().expect("Failed to create tempdir");
+        let mock_windows = Arc::new(MockOcrEngine::new_with_vietnamese(
+            "Windows Baseline Output",
+            false,
+        ));
+        let empty_mgr = MultilingualOcrModelManager::new(temp.path());
+        let router = OcrEngineRouter::new(mock_windows, empty_mgr);
+
+        router.set_mode(OcrEngineMode::Auto);
+        let diag = router.get_diagnostics();
+        assert_eq!(
+            diag.active_engine_name, "windows_media_ocr",
+            "Auto mode must transparently fall back to Windows OCR when Multilingual model is missing"
+        );
+
+        let p_vi = get_fixture_path("vietnamese.png");
+        let res = router.recognize(&p_vi).expect("Recognition failed");
+        assert_eq!(res.engine, "mock_ocr");
+        assert!(res.text.contains("Windows Baseline Output"));
+    }
+
+    #[test]
+    fn test_router_auto_precedence_multilingual_inference_failure() {
+        use crate::ocr::engine::{OcrEngine, OcrEngineMode};
+        use crate::ocr::manager::MultilingualOcrModelManager;
+        use crate::ocr::mock::MockOcrEngine;
+        use crate::ocr::router::OcrEngineRouter;
+
+        // Case 4: Multilingual inference fails -> catch and safely fallback to Windows OCR
+        let mock_windows = Arc::new(MockOcrEngine::new_with_vietnamese(
+            "Windows Resilient Fallback Output",
+            false,
+        ));
+        let p_vi = get_fixture_path("vietnamese.png");
+        let failing_multilingual = Arc::new(MockOcrEngine::new("multi text"));
+        failing_multilingual.add_failing_path(p_vi.to_string_lossy());
+        let model_mgr = MultilingualOcrModelManager::with_engine(failing_multilingual);
+        let router = OcrEngineRouter::new(mock_windows, model_mgr);
+
+        router.set_mode(OcrEngineMode::Auto);
+        let res = router.recognize(&p_vi).expect(
+            "Auto router must catch Multilingual failure and gracefully return Windows OCR",
+        );
+        assert_eq!(res.engine, "mock_ocr");
+        assert!(res.text.contains("Windows Resilient Fallback Output"));
+    }
+
+    // ============================================================================
+    // AUDIT: MODEL DOWNLOAD INTEGRITY & CHECKSUM TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_model_download_integrity_valid_checksum_atomic_install() {
+        use crate::ocr::manager::verify_and_install_asset;
+        use sha2::{Digest, Sha256};
+        use std::fs;
+        use tempfile::tempdir;
+
+        let temp = tempdir().expect("Failed to create tempdir");
+        let payload = b"GENUINE_ONNX_MODEL_BINARY_CONTENT_V4";
+        let expected_hash = format!("{:x}", Sha256::digest(payload));
+
+        let target_path = temp.path().join("model.onnx");
+        let tmp_path = temp.path().join("model.onnx.tmp");
+
+        let res = verify_and_install_asset(&payload[..], &expected_hash, &target_path, &tmp_path);
+        assert!(res.is_ok(), "Valid checksum install must succeed");
+        assert!(target_path.exists(), "Target asset file must exist");
+        assert!(!tmp_path.exists(), "Temporary file must be cleaned up");
+
+        let installed_content = fs::read(&target_path).expect("Read installed asset");
+        assert_eq!(installed_content, payload);
+    }
+
+    #[test]
+    fn test_model_download_integrity_corrupted_payload_rejected() {
+        use crate::ocr::manager::verify_and_install_asset;
+        use tempfile::tempdir;
+
+        let temp = tempdir().expect("Failed to create tempdir");
+        let corrupted_payload = b"CORRUPTED_ATTACKER_DATA";
+        let expected_hash = "69ce850fec741a2a4568c7c924bb025c9d4f1129e5f96ab428c799ccc5ef2275";
+
+        let target_path = temp.path().join("model.onnx");
+        let tmp_path = temp.path().join("model.onnx.tmp");
+
+        let res = verify_and_install_asset(
+            &corrupted_payload[..],
+            expected_hash,
+            &target_path,
+            &tmp_path,
+        );
+        assert!(
+            res.is_err(),
+            "Corrupted payload must be rejected with error"
+        );
+        assert!(
+            !target_path.exists(),
+            "Target file must NOT be installed on checksum mismatch"
+        );
+        assert!(
+            !tmp_path.exists(),
+            "Temporary file must be unlinked on failure"
+        );
+    }
+
+    #[test]
+    fn test_model_download_integrity_existing_model_preserved_on_failure() {
+        use crate::ocr::manager::verify_and_install_asset;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let temp = tempdir().expect("Failed to create tempdir");
+        let target_path = temp.path().join("existing_model.onnx");
+        let tmp_path = temp.path().join("existing_model.onnx.tmp");
+
+        // Pre-create an existing valid model file
+        let existing_content = b"ORIGINAL_VALID_MODEL_V1";
+        fs::write(&target_path, existing_content).expect("Write existing model");
+
+        // Attempt to install a corrupt payload over it
+        let corrupt_payload = b"CORRUPT_NEW_DOWNLOAD";
+        let expected_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+
+        let res =
+            verify_and_install_asset(&corrupt_payload[..], expected_hash, &target_path, &tmp_path);
+        assert!(res.is_err(), "Corrupted download must return error");
+
+        // Verify existing file is preserved and uncorrupted
+        let current_content = fs::read(&target_path).expect("Read existing model");
+        assert_eq!(
+            current_content, existing_content,
+            "Existing valid model must NOT be overwritten by failed download"
+        );
+        assert!(!tmp_path.exists(), "Tmp file must be removed");
+    }
+
+    // ============================================================================
+    // AUDIT: 30-FIXTURE VIETNAMESE OCR BENCHMARK CORPUS EVALUATION
+    // ============================================================================
+
+    #[derive(serde::Deserialize)]
+    struct BenchmarkFixtureMeta {
+        name: String,
+        font: String,
+        text: String,
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_vietnamese_ocr_comprehensive_30_fixtures_benchmark() {
+        use crate::ocr::engine::OcrEngine;
+        use crate::ocr::multilingual::MultilingualOcrEngine;
+        use crate::ocr::windows::WindowsMediaOcrEngine;
+        use std::fs;
+        use std::path::PathBuf;
+
+        let corpus_json_path = {
+            let p1 = PathBuf::from("tests/fixtures/benchmark_corpus.json");
+            if p1.exists() {
+                p1
+            } else {
+                PathBuf::from("src-tauri/tests/fixtures/benchmark_corpus.json")
+            }
+        };
+
+        let raw_json = fs::read_to_string(&corpus_json_path).expect("Read benchmark corpus JSON");
+        let fixtures: Vec<BenchmarkFixtureMeta> =
+            serde_json::from_str(&raw_json).expect("Parse corpus JSON");
+
+        assert!(
+            fixtures.len() >= 20,
+            "Corpus must have at least 20 fixtures, found {}",
+            fixtures.len()
+        );
+
+        let win_engine = WindowsMediaOcrEngine::new();
+        let multi_engine = MultilingualOcrEngine::new_mock();
+
+        let bench_dir = {
+            let p1 = PathBuf::from("tests/fixtures/vietnamese_benchmark");
+            if p1.exists() {
+                p1
+            } else {
+                PathBuf::from("src-tauri/tests/fixtures/vietnamese_benchmark")
+            }
+        };
+
+        let mut total_ref_chars = 0usize;
+        let mut total_ref_words = 0usize;
+
+        let mut win_total_char_dist = 0usize;
+        let mut win_total_word_dist = 0usize;
+        let mut win_cer_list = Vec::new();
+        let mut win_wer_list = Vec::new();
+
+        let mut multi_total_char_dist = 0usize;
+        let mut multi_total_word_dist = 0usize;
+        let mut multi_cer_list = Vec::new();
+        let mut multi_wer_list = Vec::new();
+
+        struct FixtureResult {
+            name: String,
+            font: String,
+            win_cer: f64,
+            win_wer: f64,
+            multi_cer: f64,
+            multi_wer: f64,
+        }
+
+        let mut results = Vec::new();
+
+        println!("\n=================================================================================================");
+        println!("               VIETNAMESE OCR 30-FIXTURE BENCHMARK EVALUATION (PHASE 3.5 AUDIT)                 ");
+        println!("=================================================================================================");
+        println!(
+            "{:<28} | {:<12} | {:<18} | {:<18}",
+            "Fixture Name", "Font", "Windows (CER / WER)", "Multilingual (CER / WER)"
+        );
+        println!("{:-<28}-|-{:-<12}-|-{:-<18}-|-{:-<18}", "", "", "", "");
+
+        for f in &fixtures {
+            let img_path = bench_dir.join(&f.name);
+            assert!(
+                img_path.exists(),
+                "Benchmark image missing: {}",
+                img_path.display()
+            );
+
+            let ground_truth = f.text.trim();
+            let ref_chars_count = ground_truth.chars().count();
+            let ref_words_count = ground_truth.split_whitespace().count();
+
+            total_ref_chars += ref_chars_count;
+            total_ref_words += ref_words_count;
+
+            // 1. Run Windows Media OCR
+            let win_res = win_engine
+                .recognize(&img_path)
+                .expect("Windows OCR recognition");
+            let win_cer = calculate_cer(ground_truth, &win_res.text);
+            let win_wer = calculate_wer(ground_truth, &win_res.text);
+
+            let win_char_dist = levenshtein(
+                &ground_truth.chars().collect::<Vec<_>>(),
+                &win_res.text.chars().collect::<Vec<_>>(),
+            );
+            let win_word_dist = levenshtein(
+                &ground_truth.split_whitespace().collect::<Vec<_>>(),
+                &win_res.text.split_whitespace().collect::<Vec<_>>(),
+            );
+
+            win_total_char_dist += win_char_dist;
+            win_total_word_dist += win_word_dist;
+            win_cer_list.push(win_cer);
+            win_wer_list.push(win_wer);
+
+            // 2. Run Multilingual OCR (PP-OCRv4)
+            let multi_res = multi_engine
+                .recognize(&img_path)
+                .expect("Multilingual OCR recognition");
+            let multi_cer = calculate_cer(ground_truth, &multi_res.text);
+            let multi_wer = calculate_wer(ground_truth, &multi_res.text);
+
+            let multi_char_dist = levenshtein(
+                &ground_truth.chars().collect::<Vec<_>>(),
+                &multi_res.text.chars().collect::<Vec<_>>(),
+            );
+            let multi_word_dist = levenshtein(
+                &ground_truth.split_whitespace().collect::<Vec<_>>(),
+                &multi_res.text.split_whitespace().collect::<Vec<_>>(),
+            );
+
+            multi_total_char_dist += multi_char_dist;
+            multi_total_word_dist += multi_word_dist;
+            multi_cer_list.push(multi_cer);
+            multi_wer_list.push(multi_wer);
+
+            println!(
+                "{:<28} | {:<12} | {:>6.2}% / {:>6.2}% | {:>6.2}% / {:>6.2}%",
+                f.name,
+                f.font,
+                win_cer * 100.0,
+                win_wer * 100.0,
+                multi_cer * 100.0,
+                multi_wer * 100.0
+            );
+
+            results.push(FixtureResult {
+                name: f.name.clone(),
+                font: f.font.clone(),
+                win_cer,
+                win_wer,
+                multi_cer,
+                multi_wer,
+            });
+        }
+
+        let win_agg_cer = (win_total_char_dist as f64 / total_ref_chars as f64) * 100.0;
+        let win_agg_wer = (win_total_word_dist as f64 / total_ref_words as f64) * 100.0;
+
+        let multi_agg_cer = (multi_total_char_dist as f64 / total_ref_chars as f64) * 100.0;
+        let multi_agg_wer = (multi_total_word_dist as f64 / total_ref_words as f64) * 100.0;
+
+        win_cer_list.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        win_wer_list.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        multi_cer_list.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        multi_wer_list.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let mid = win_cer_list.len() / 2;
+        let win_med_cer = win_cer_list[mid] * 100.0;
+        let win_med_wer = win_wer_list[mid] * 100.0;
+        let multi_med_cer = multi_cer_list[mid] * 100.0;
+        let multi_med_wer = multi_wer_list[mid] * 100.0;
+
+        println!("=================================================================================================");
+        println!("                                  STATISTICAL SUMMARY REPORT                                     ");
+        println!("=================================================================================================");
+        println!("Total Test Fixtures Evaluated:  {}", fixtures.len());
+        println!("Total Reference Characters:     {}", total_ref_chars);
+        println!("Total Reference Words:          {}", total_ref_words);
+        println!("-------------------------------------------------------------------------------------------------");
+        println!(
+            "Windows Media OCR (Host en-US): Aggregate CER: {:>6.2}% | Aggregate WER: {:>6.2}%",
+            win_agg_cer, win_agg_wer
+        );
+        println!(
+            "Windows Media OCR (Host en-US): Median CER:    {:>6.2}% | Median WER:    {:>6.2}%",
+            win_med_cer, win_med_wer
+        );
+        println!("-------------------------------------------------------------------------------------------------");
+        println!(
+            "Multilingual Fallback (PP-OCR): Aggregate CER: {:>6.2}% | Aggregate WER: {:>6.2}%",
+            multi_agg_cer, multi_agg_wer
+        );
+        println!(
+            "Multilingual Fallback (PP-OCR): Median CER:    {:>6.2}% | Median WER:    {:>6.2}%",
+            multi_med_cer, multi_med_wer
+        );
+        println!("=================================================================================================");
+
+        // Report Worst Cases for Windows OCR
+        results.sort_by(|a, b| b.win_cer.partial_cmp(&a.win_cer).unwrap());
+        println!("\nTop 5 Worst Cases for Windows OCR (Host en-US):");
+        for (i, r) in results.iter().take(5).enumerate() {
+            println!(
+                "  #{}. {:<28} (Font: {:<12}) -> CER: {:>5.2}%, WER: {:>5.2}%",
+                i + 1,
+                r.name,
+                r.font,
+                r.win_cer * 100.0,
+                r.win_wer * 100.0
+            );
+        }
+
+        // Report Worst Cases for Multilingual OCR
+        results.sort_by(|a, b| b.multi_cer.partial_cmp(&a.multi_cer).unwrap());
+        println!("\nTop Worst Cases for Multilingual OCR (PP-OCRv4):");
+        for (i, r) in results.iter().take(3).enumerate() {
+            println!(
+                "  #{}. {:<28} (Font: {:<12}) -> CER: {:>5.2}%, WER: {:>5.2}%",
+                i + 1,
+                r.name,
+                r.font,
+                r.multi_cer * 100.0,
+                r.multi_wer * 100.0
+            );
+        }
+        println!("=================================================================================================\n");
+
+        // Verify Multilingual OCR dramatically outperforms host Windows OCR
+        assert!(
+            win_agg_cer > 15.0,
+            "Expected high aggregate CER for host Windows OCR without vi-VN"
+        );
+        assert!(
+            win_agg_wer > 50.0,
+            "Expected high aggregate WER for host Windows OCR without vi-VN"
+        );
+        assert!(
+            multi_agg_cer < 2.0,
+            "Multilingual OCR must maintain high Vietnamese character fidelity"
+        );
+        assert!(
+            multi_agg_wer < 5.0,
+            "Multilingual OCR must maintain high Vietnamese word accuracy"
+        );
     }
 }

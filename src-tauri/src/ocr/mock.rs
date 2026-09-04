@@ -11,6 +11,7 @@ pub struct MockOcrEngine {
     default_text: Mutex<String>,
     fail_paths: Mutex<HashSet<String>>,
     empty_paths: Mutex<HashSet<String>>,
+    supports_vietnamese: bool,
 }
 
 impl MockOcrEngine {
@@ -19,6 +20,16 @@ impl MockOcrEngine {
             default_text: Mutex::new(default_text.into()),
             fail_paths: Mutex::new(HashSet::new()),
             empty_paths: Mutex::new(HashSet::new()),
+            supports_vietnamese: false,
+        }
+    }
+
+    pub fn new_with_vietnamese(default_text: impl Into<String>, supports_vietnamese: bool) -> Self {
+        Self {
+            default_text: Mutex::new(default_text.into()),
+            fail_paths: Mutex::new(HashSet::new()),
+            empty_paths: Mutex::new(HashSet::new()),
+            supports_vietnamese,
         }
     }
 
@@ -75,9 +86,17 @@ impl OcrEngine for MockOcrEngine {
         super::engine::OcrEngineInfo {
             engine_name: self.name().to_string(),
             engine_version: self.version().to_string(),
-            active_language: "en-US".to_string(),
-            available_languages: vec!["en-US".to_string(), "vi-VN".to_string()],
-            supports_vietnamese: true,
+            active_language: if self.supports_vietnamese {
+                "vi-VN".to_string()
+            } else {
+                "en-US".to_string()
+            },
+            available_languages: if self.supports_vietnamese {
+                vec!["en-US".to_string(), "vi-VN".to_string()]
+            } else {
+                vec!["en-US".to_string()]
+            },
+            supports_vietnamese: self.supports_vietnamese,
             max_image_dimension: 2600,
         }
     }
