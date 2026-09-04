@@ -52,12 +52,57 @@ impl OcrEngineRouter {
     }
 
     pub fn set_mode(&self, mode: OcrEngineMode) {
-        *self.mode.write().unwrap() = mode;
-        log::info!("OCR Engine Router mode set to {:?}", mode);
+        match self.mode.write() {
+            Ok(mut current) => {
+                let previous = *current;
+                *current = mode;
+                log::info!(
+                    "OCR mode switch requested={mode:?} previous={previous:?} result=success"
+                );
+            }
+            Err(error) => {
+                log::error!(
+                    "OCR mode switch requested={mode:?} result=error lock_poisoned={error}"
+                );
+            }
+        }
+    }
+
+    /// Updates the active mode after validating prerequisites required by a forced engine.
+    ///
+    /// The mode is held in memory for the lifetime of the application. Existing indexing
+    /// workers keep using the same router, so the next recognition call observes this value.
+    pub fn try_set_mode(&self, mode: OcrEngineMode) -> Result<(), AppError> {
+        let mut current = self
+            .mode
+            .write()
+            .map_err(|error| AppError::ocr(format!("Failed to update OCR engine mode: {error}")))?;
+        let previous = *current;
+
+        if mode == OcrEngineMode::Multilingual && self.model_manager.get_engine().is_none() {
+            let error = AppError::ocr_unavailable(
+                "Hybrid Vietnamese OCR is not ready. Download the Vietnamese OCR model and wait until it is Ready before selecting this mode.",
+            );
+            log::warn!(
+                "OCR mode switch requested={mode:?} previous={previous:?} result=error code={:?}",
+                error.code
+            );
+            return Err(error);
+        }
+
+        *current = mode;
+        log::info!("OCR mode switch requested={mode:?} previous={previous:?} result=success");
+        Ok(())
     }
 
     pub fn get_mode(&self) -> OcrEngineMode {
-        *self.mode.read().unwrap()
+        self.mode
+            .read()
+            .map(|current| *current)
+            .unwrap_or_else(|error| {
+                log::error!("Failed to read OCR engine mode: {error}; using Auto");
+                OcrEngineMode::Auto
+            })
     }
 
     pub fn get_model_manager(&self) -> Arc<MultilingualOcrModelManager> {

@@ -1,5 +1,6 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { OCR_ENGINE_MODE } from "@/types";
 import type {
   Folder,
   ScanSummary,
@@ -547,7 +548,7 @@ export async function getOcrEngineDiagnostics(): Promise<OcrEngineDiagnostics> {
     return await invoke<OcrEngineDiagnostics>("get_ocr_engine_diagnostics");
   }
   return {
-    mode: "Auto",
+    mode: OCR_ENGINE_MODE.AUTO,
     activeEngineName: "windows_media_ocr",
     windowsInfo: {
       engineName: "windows_media_ocr",
@@ -571,8 +572,15 @@ export async function getOcrEngineDiagnostics(): Promise<OcrEngineDiagnostics> {
 
 /** Sets the active OCR Engine Router mode */
 export async function setOcrEngineMode(mode: OcrEngineMode): Promise<void> {
+  const payload = { mode };
+  if (import.meta.env.DEV) {
+    console.debug("[ocr-mode] IPC set_ocr_engine_mode", {
+      requestedMode: mode,
+      payload,
+    });
+  }
   if (isTauri()) {
-    await invoke("set_ocr_engine_mode", { mode });
+    await invoke("set_ocr_engine_mode", payload);
   }
 }
 
@@ -626,5 +634,4 @@ export async function onOcrModelStatusChanged(
   }
   return () => {};
 }
-
 

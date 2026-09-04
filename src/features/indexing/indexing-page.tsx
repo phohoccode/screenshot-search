@@ -56,6 +56,29 @@ import type {
   OcrEngineDiagnostics,
   OcrEngineMode,
 } from "@/types";
+import { OCR_ENGINE_MODE } from "@/types";
+
+function getCommandErrorMessage(error: unknown, fallback: string): string {
+  if (typeof error === "string") {
+    try {
+      const parsed: unknown = JSON.parse(error);
+      if (parsed && typeof parsed === "object" && "message" in parsed) {
+        const message = (parsed as { message?: unknown }).message;
+        if (typeof message === "string") return message;
+      }
+    } catch {
+      // Unstructured Tauri errors are intentionally hidden from normal UI.
+    }
+    return fallback;
+  }
+
+  if (error && typeof error === "object" && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+
+  return fallback;
+}
 
 export function IndexingPage() {
   const [ocrStats, setOcrStats] = useState<OcrStats | null>(null);
@@ -71,13 +94,16 @@ export function IndexingPage() {
   const [isDownloadingModel, setIsDownloadingModel] = useState(false);
   const [isRebuildingEmbeddings, setIsRebuildingEmbeddings] = useState(false);
   const [isDownloadingOcrModel, setIsDownloadingOcrModel] = useState(false);
+  const [isChangingEngineMode, setIsChangingEngineMode] = useState(false);
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [isReprocessDialogOpen, setIsReprocessDialogOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const pollingRef = useRef<number | null>(null);
+  const refreshRequestRef = useRef(0);
 
   const refreshAll = useCallback(async () => {
+    const requestId = ++refreshRequestRef.current;
     try {
       const [statsData, statusData, modelData, embData, ocrDiagData, eligibleData] =
         await Promise.all([
@@ -88,6 +114,11 @@ export function IndexingPage() {
           getOcrEngineDiagnostics().catch(() => null),
           getReOcrEligibleCount().catch(() => 0),
         ]);
+
+      // A poll/event refresh can overlap a mode switch refresh. Only the newest
+      // response may update diagnostics, keeping the backend-confirmed mode visible.
+      if (requestId !== refreshRequestRef.current) return;
+
       setOcrStats(statsData);
       if (statusData) {
         setServiceStatus(statusData);
@@ -225,16 +256,20 @@ export function IndexingPage() {
   };
 
   const handleSetEngineMode = async (mode: OcrEngineMode) => {
+    const previousMode = ocrDiagnostics?.mode ?? OCR_ENGINE_MODE.AUTO;
     setErrorMessage(null);
+    if (mode === previousMode) return;
+
+    setIsChangingEngineMode(true);
     try {
       await setOcrEngineMode(mode);
+      // The diagnostics response remains the source of truth; do not optimistically
+      // update the selected mode before the backend confirms the switch.
       await refreshAll();
     } catch (err: unknown) {
-      const msg =
-        err && typeof err === "object" && "message" in err
-          ? (err as { message: string }).message
-          : "Failed to set OCR engine mode";
-      setErrorMessage(msg);
+      setErrorMessage(getCommandErrorMessage(err, "Failed to set OCR engine mode"));
+    } finally {
+      setIsChangingEngineMode(false);
     }
   };
 
@@ -272,7 +307,7 @@ export function IndexingPage() {
     }
   };
 
-  const activeMode = ocrDiagnostics?.mode ?? "Auto";
+  const activeMode = ocrDiagnostics?.mode ?? OCR_ENGINE_MODE.AUTO;
   const isMultilingualReady = ocrDiagnostics?.isMultilingualReady ?? false;
   const isMultilingualDownloading =
     isDownloadingOcrModel ||
@@ -471,9 +506,10 @@ export function IndexingPage() {
               <div className="flex items-center gap-1 bg-muted p-0.5 rounded-lg border border-border">
                 <button
                   type="button"
-                  onClick={() => handleSetEngineMode("Auto")}
+                  onClick={() => handleSetEngineMode(OCR_ENGINE_MODE.AUTO)}
+                  disabled={isChangingEngineMode}
                   className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                    activeMode === "Auto"
+                    activeMode === OCR_ENGINE_MODE.AUTO
                       ? "bg-background text-foreground shadow-xs"
                       : "text-muted-foreground hover:text-foreground"
                   }`}
@@ -482,9 +518,10 @@ export function IndexingPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleSetEngineMode("Windows")}
+                  onClick={() => handleSetEngineMode(OCR_ENGINE_MODE.WINDOWS_NATIVE)}
+                  disabled={isChangingEngineMode}
                   className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                    activeMode === "Windows"
+                    activeMode === OCR_ENGINE_MODE.WINDOWS_NATIVE
                       ? "bg-background text-foreground shadow-xs"
                       : "text-muted-foreground hover:text-foreground"
                   }`}
@@ -493,9 +530,10 @@ export function IndexingPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleSetEngineMode("Multilingual")}
+                  onClick={() => handleSetEngineMode(OCR_ENGINE_MODE.HYBRID_VIETNAMESE)}
+                  disabled={isChangingEngineMode}
                   className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                    activeMode === "Multilingual"
+                    activeMode === OCR_ENGINE_MODE.HYBRID_VIETNAMESE
                       ? "bg-background text-foreground shadow-xs"
                       : "text-muted-foreground hover:text-foreground"
                   }`}

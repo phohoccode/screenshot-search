@@ -931,6 +931,122 @@ mod tests {
     }
 
     #[test]
+    fn test_ocr_router_mode_switch_validates_model_and_is_safe_during_indexing() {
+        use crate::errors::ErrorCode;
+        use crate::ocr::engine::{OcrEngine, OcrEngineInfo, OcrEngineMode, OcrResult};
+        use crate::ocr::manager::MultilingualOcrModelManager;
+        use crate::ocr::router::OcrEngineRouter;
+        use std::path::Path;
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+        use std::time::Duration;
+
+        struct DelayedMockEngine {
+            inner: Arc<MockOcrEngine>,
+            started: Arc<AtomicBool>,
+        }
+
+        impl OcrEngine for DelayedMockEngine {
+            fn recognize(&self, path: &Path) -> Result<OcrResult, crate::errors::AppError> {
+                self.started.store(true, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(40));
+                self.inner.recognize(path)
+            }
+
+            fn get_info(&self) -> OcrEngineInfo {
+                self.inner.get_info()
+            }
+
+            fn name(&self) -> &str {
+                self.inner.name()
+            }
+
+            fn version(&self) -> &str {
+                self.inner.version()
+            }
+        }
+
+        let started = Arc::new(AtomicBool::new(false));
+        let windows = Arc::new(DelayedMockEngine {
+            inner: Arc::new(MockOcrEngine::new_custom(
+                "windows result",
+                "windows_media_ocr",
+                "winrt_v1",
+                false,
+            )),
+            started: started.clone(),
+        });
+        let hybrid = Arc::new(MockOcrEngine::new_custom(
+            "hybrid result",
+            "hybrid_windows_vietocr",
+            "hybrid_v1",
+            true,
+        ));
+        let router =
+            OcrEngineRouter::new(windows, MultilingualOcrModelManager::with_engine(hybrid));
+
+        router
+            .try_set_mode(OcrEngineMode::Windows)
+            .expect("Windows mode should be accepted");
+        assert_eq!(router.get_mode(), OcrEngineMode::Windows);
+
+        let db = setup_test_db();
+        insert_screenshot(
+            &db.conn.lock().unwrap(),
+            1,
+            r"C:\Screenshots\mode-switch.png",
+            "mode-switch.png",
+            "png",
+            1,
+            "2026-09-04T00:00:00Z",
+            "mode-switch-hash",
+        )
+        .expect("insert pending screenshot");
+
+        let worker_router = router.clone();
+        let worker_db = db.clone();
+        let worker = thread::spawn(move || {
+            run_ocr_batch(
+                &worker_db,
+                worker_router.as_ref(),
+                None,
+                Some(1),
+                Arc::new(AtomicBool::new(false)),
+                None,
+            )
+            .expect("OCR worker should complete");
+        });
+
+        for _ in 0..100 {
+            if started.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            started.load(Ordering::SeqCst),
+            "worker did not start recognition"
+        );
+
+        router
+            .try_set_mode(OcrEngineMode::Multilingual)
+            .expect("mode switch must not block an in-flight recognition");
+        assert_eq!(router.get_mode(), OcrEngineMode::Multilingual);
+        worker.join().expect("worker thread must not panic");
+
+        let empty_router = OcrEngineRouter::new(
+            Arc::new(MockOcrEngine::new("windows result")),
+            MultilingualOcrModelManager::new_empty_for_test(),
+        );
+        let error = empty_router
+            .try_set_mode(OcrEngineMode::Multilingual)
+            .expect_err("Hybrid mode must require a ready model");
+        assert_eq!(error.code, ErrorCode::OcrEngineUnavailable);
+        assert!(error.message.contains("not ready"));
+        assert_eq!(empty_router.get_mode(), OcrEngineMode::Auto);
+    }
+
+    #[test]
     fn test_re_ocr_atomic_cascade_updates_fts_and_invalidates_embedding() {
         let db = setup_test_db();
         let conn = db.conn.lock().unwrap();

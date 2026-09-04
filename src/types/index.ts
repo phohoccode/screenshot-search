@@ -112,7 +112,14 @@ export interface SearchResultPage {
   hasMore: boolean;
 }
 
-export type OcrEngineMode = "Auto" | "Windows" | "Multilingual";
+/** Canonical OCR mode values shared by the UI and the Rust/Tauri wire contract. */
+export const OCR_ENGINE_MODE = {
+  AUTO: "auto",
+  WINDOWS_NATIVE: "windows_native",
+  HYBRID_VIETNAMESE: "hybrid_vietnamese",
+} as const;
+
+export type OcrEngineMode = (typeof OCR_ENGINE_MODE)[keyof typeof OCR_ENGINE_MODE];
 
 export type MultilingualOcrStatus =
   | { status: "notInstalled" }

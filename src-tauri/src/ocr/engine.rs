@@ -5,19 +5,62 @@ use crate::errors::AppError;
 
 /// User-configurable OCR engine selection mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum OcrEngineMode {
     /// Automatically selects native Windows OCR when vi-VN is supported, or Multilingual OCR fallback.
+    #[serde(rename = "auto")]
     Auto,
     /// Forces native Windows Media OCR.
+    #[serde(rename = "windows_native")]
     Windows,
     /// Forces local multilingual ONNX OCR fallback.
+    #[serde(rename = "hybrid_vietnamese")]
     Multilingual,
 }
 
 impl Default for OcrEngineMode {
     fn default() -> Self {
         Self::Auto
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OcrEngineMode;
+
+    #[test]
+    fn ocr_engine_mode_wire_contract_round_trips() {
+        let cases = [
+            ("auto", OcrEngineMode::Auto),
+            ("windows_native", OcrEngineMode::Windows),
+            ("hybrid_vietnamese", OcrEngineMode::Multilingual),
+        ];
+
+        for (wire_value, mode) in cases {
+            let json = serde_json::to_string(&mode).expect("serialize OCR mode");
+            assert_eq!(json, format!("\"{wire_value}\""));
+
+            let decoded: OcrEngineMode = serde_json::from_str(&json).expect("deserialize OCR mode");
+            assert_eq!(decoded, mode);
+        }
+    }
+
+    #[test]
+    fn ocr_engine_mode_wire_contract_rejects_invalid_values() {
+        let error = serde_json::from_str::<OcrEngineMode>(r#""hybrid""#)
+            .expect_err("invalid OCR mode must be rejected");
+        assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn frontend_ocr_mode_mapping_uses_the_same_wire_values() {
+        let frontend_types = include_str!("../../../src/types/index.ts");
+        for wire_value in ["auto", "windows_native", "hybrid_vietnamese"] {
+            assert!(
+                frontend_types.contains(&format!("\"{wire_value}\"")),
+                "frontend mapping is missing {wire_value}"
+            );
+        }
     }
 }
 

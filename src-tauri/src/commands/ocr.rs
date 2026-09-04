@@ -53,6 +53,7 @@ pub async fn start_ocr_indexing(
     app: AppHandle,
     db: State<'_, Database>,
     ocr_mgr: State<'_, OcrManager>,
+    router: State<'_, std::sync::Arc<crate::ocr::router::OcrEngineRouter>>,
     folder_id: Option<i64>,
     limit: Option<usize>,
 ) -> CommandResult<OcrBatchSummary> {
@@ -66,6 +67,7 @@ pub async fn start_ocr_indexing(
     let cancel_flag = ocr_mgr.cancel_flag.clone();
     let app_clone = app.clone();
     let db_clone = db.inner().clone();
+    let router_clone = router.inner().clone();
 
     // Spawn execution off the async thread with RAII guard moved into the worker
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -79,11 +81,9 @@ pub async fn start_ocr_indexing(
             );
         }
 
-        let engine = WindowsMediaOcrEngine::new();
-
         let summary = run_ocr_batch(
             &db_clone,
-            &engine,
+            router_clone.as_ref(),
             folder_id,
             limit,
             cancel_flag,
@@ -193,14 +193,13 @@ pub fn get_ocr_engine_diagnostics(
     Ok(router.get_diagnostics())
 }
 
-/// Updates the active OCR Engine Router mode (`Auto`, `Windows`, `Multilingual`).
+/// Updates the active OCR Engine Router mode.
 #[tauri::command]
 pub fn set_ocr_engine_mode(
     router: State<'_, std::sync::Arc<crate::ocr::router::OcrEngineRouter>>,
     mode: crate::ocr::engine::OcrEngineMode,
 ) -> CommandResult<()> {
-    router.set_mode(mode);
-    Ok(())
+    router.try_set_mode(mode)
 }
 
 /// Triggers on-demand background download of the local multilingual OCR model.
