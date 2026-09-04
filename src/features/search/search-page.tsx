@@ -14,6 +14,7 @@ import {
   FileText,
   Loader2,
   AlertCircle,
+  Sparkles,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -36,11 +37,14 @@ import {
   revealScreenshot,
   getOcrStats,
   onIndexingCompleted,
+  getSemanticModelInfo,
+  onSemanticModelReady,
 } from "@/lib/tauri";
 import type {
   SearchResultItem,
   ScreenshotDetail,
   OcrStats,
+  SemanticModelInfo,
 } from "@/types";
 
 /** Renders snippet with highlight tokens cleanly using React text nodes (no dangerouslySetInnerHTML) */
@@ -76,6 +80,7 @@ export function SearchPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [stats, setStats] = useState<OcrStats | null>(null);
+  const [semanticModel, setSemanticModel] = useState<SemanticModelInfo | null>(null);
 
   // Preview Dialog State
   const [selectedScreenshot, setSelectedScreenshot] = useState<ScreenshotDetail | null>(null);
@@ -117,11 +122,28 @@ export function SearchPage() {
 
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Load stats initially
+  // Load stats and semantic model info initially
   useEffect(() => {
     getOcrStats()
       .then(setStats)
       .catch(() => setStats(null));
+
+    getSemanticModelInfo()
+      .then(setSemanticModel)
+      .catch(() => setSemanticModel(null));
+
+    let unlisten: (() => void) | undefined;
+    onSemanticModelReady(() => {
+      getSemanticModelInfo()
+        .then(setSemanticModel)
+        .catch(() => {});
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
   }, []);
 
   // Listen to background indexing completion events to refresh results automatically
@@ -272,8 +294,25 @@ export function SearchPage() {
             )}
           </div>
 
-          {/* Match counter / status */}
-          <div className="flex items-center gap-2 text-xs text-muted-foreground whitespace-nowrap">
+          {/* Match counter / status / search mode */}
+          <div className="flex items-center gap-2.5 text-xs text-muted-foreground whitespace-nowrap">
+            {semanticModel?.isAvailable ? (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+                title="Hybrid Search active: combines exact technical keywords with local AI semantic understanding"
+              >
+                <Sparkles className="h-3 w-3" />
+                Hybrid Search
+              </span>
+            ) : (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground border border-border"
+                title="Keyword Search active: SQLite FTS5 (semantic model not downloaded)"
+              >
+                Keyword Search
+              </span>
+            )}
+
             {isLoading ? (
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -389,13 +428,37 @@ export function SearchPage() {
 
                   {/* Card Content */}
                   <div className="flex flex-1 flex-col gap-1.5 p-3">
-                    <div className="flex items-start justify-between gap-1">
+                    <div className="flex items-center justify-between gap-1.5">
                       <h3
-                        className="truncate text-xs font-semibold text-foreground"
+                        className="truncate text-xs font-semibold text-foreground flex-1"
                         title={item.filename}
                       >
                         {item.filename}
                       </h3>
+                      {item.matchType === "exact" && (
+                        <span
+                          className="shrink-0 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400"
+                          title="Exact technical code / token match"
+                        >
+                          Exact
+                        </span>
+                      )}
+                      {item.matchType === "semantic" && (
+                        <span
+                          className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
+                          title="Matched by semantic meaning"
+                        >
+                          Meaning
+                        </span>
+                      )}
+                      {item.matchType === "hybrid" && (
+                        <span
+                          className="shrink-0 rounded bg-purple-500/15 px-1.5 py-0.5 text-[10px] font-medium text-purple-600 dark:text-purple-400"
+                          title="Combined keyword & semantic match"
+                        >
+                          Hybrid
+                        </span>
+                      )}
                     </div>
 
                     {/* Highlighted Match Snippet */}

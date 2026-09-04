@@ -11,6 +11,9 @@ import {
   Languages,
   Maximize2,
   Sparkles,
+  Download,
+  RefreshCw,
+  Cpu,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -22,32 +25,55 @@ import {
   resumeIndexing,
   retryFailedIndexJobs,
   onIndexingCompleted,
+  getSemanticModelInfo,
+  downloadSemanticModel,
+  rebuildSemanticIndex,
+  getEmbeddingStats,
+  onSemanticModelReady,
 } from "@/lib/tauri";
 import type {
   OcrStats,
   OcrEngineInfo,
   IndexingServiceStatus,
+  SemanticModelInfo,
+  EmbeddingStats,
 } from "@/types";
 
 export function IndexingPage() {
   const [ocrStats, setOcrStats] = useState<OcrStats | null>(null);
   const [engineInfo, setEngineInfo] = useState<OcrEngineInfo | null>(null);
   const [serviceStatus, setServiceStatus] = useState<IndexingServiceStatus | null>(null);
+  const [modelInfo, setModelInfo] = useState<SemanticModelInfo | null>(null);
+  const [embeddingStats, setEmbeddingStats] = useState<EmbeddingStats | null>(null);
+
   const [isTogglingPause, setIsTogglingPause] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [isDownloadingModel, setIsDownloadingModel] = useState(false);
+  const [isRebuildingEmbeddings, setIsRebuildingEmbeddings] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const pollingRef = useRef<number | null>(null);
 
   const refreshAll = useCallback(async () => {
     try {
-      const [statsData, statusData] = await Promise.all([
+      const [statsData, statusData, modelData, embData] = await Promise.all([
         getOcrStats(),
         getIndexingStatus().catch(() => null),
+        getSemanticModelInfo().catch(() => null),
+        getEmbeddingStats().catch(() => null),
       ]);
       setOcrStats(statsData);
       if (statusData) {
         setServiceStatus(statusData);
+      }
+      if (modelData) {
+        setModelInfo(modelData);
+        if (modelData.isAvailable) {
+          setIsDownloadingModel(false);
+        }
+      }
+      if (embData) {
+        setEmbeddingStats(embData);
       }
     } catch (err) {
       console.error("Failed to load indexing stats", err);
@@ -59,18 +85,27 @@ export function IndexingPage() {
     getOcrEngineInfo().then(setEngineInfo).catch(console.error);
 
     // Listen to background indexing completion events
-    let unlisten: (() => void) | undefined;
+    let unlistenIndexing: (() => void) | undefined;
     onIndexingCompleted(() => {
       refreshAll();
     }).then((fn) => {
-      unlisten = fn;
+      unlistenIndexing = fn;
+    });
+
+    // Listen to semantic model download readiness events
+    let unlistenSemantic: (() => void) | undefined;
+    onSemanticModelReady(() => {
+      refreshAll();
+    }).then((fn) => {
+      unlistenSemantic = fn;
     });
 
     // Periodic lightweight refresh every 3 seconds to keep metrics fresh
     pollingRef.current = window.setInterval(refreshAll, 3000);
 
     return () => {
-      if (unlisten) unlisten();
+      if (unlistenIndexing) unlistenIndexing();
+      if (unlistenSemantic) unlistenSemantic();
       if (pollingRef.current) clearInterval(pollingRef.current);
     };
   }, [refreshAll]);
@@ -114,6 +149,39 @@ export function IndexingPage() {
     }
   };
 
+  const handleDownloadModel = async () => {
+    setIsDownloadingModel(true);
+    setErrorMessage(null);
+    try {
+      await downloadSemanticModel();
+      await refreshAll();
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === "object" && "message" in err
+          ? (err as { message: string }).message
+          : "Failed to initiate model download";
+      setErrorMessage(msg);
+      setIsDownloadingModel(false);
+    }
+  };
+
+  const handleRebuildEmbeddings = async () => {
+    setIsRebuildingEmbeddings(true);
+    setErrorMessage(null);
+    try {
+      await rebuildSemanticIndex();
+      await refreshAll();
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === "object" && "message" in err
+          ? (err as { message: string }).message
+          : "Failed to rebuild semantic embeddings";
+      setErrorMessage(msg);
+    } finally {
+      setIsRebuildingEmbeddings(false);
+    }
+  };
+
   // Metric computations
   const total = ocrStats?.total ?? 0;
   const succeeded = ocrStats?.succeeded ?? 0;
@@ -123,13 +191,23 @@ export function IndexingPage() {
   const isActivelyIndexing = pending > 0 && !isPaused;
   const percent = total > 0 ? Math.min(100, Math.round((succeeded / total) * 100)) : 0;
 
+  const embeddedCount = embeddingStats?.embeddedCount ?? 0;
+  const pendingEmbeddings = embeddingStats?.pendingCount ?? 0;
+  const totalPendingAll = pending + pendingEmbeddings;
+  const semanticPercent =
+    succeeded > 0 ? Math.min(100, Math.round((embeddedCount / succeeded) * 100)) : 0;
+
+  const isModelReady = modelInfo?.isAvailable ?? false;
+  const isModelDownloading =
+    isDownloadingModel || modelInfo?.status.status === "downloading";
+
   return (
     <div className="flex h-full flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
         <div>
           <h1 className="text-base font-semibold text-foreground">Background Indexing</h1>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Automated filesystem watcher, local OCR, and SQLite FTS5 index.
+            Automated filesystem watcher, local OCR, and hybrid semantic vector index.
           </p>
         </div>
 
@@ -140,10 +218,10 @@ export function IndexingPage() {
               <Pause className="h-3 w-3" />
               Paused
             </span>
-          ) : isActivelyIndexing ? (
+          ) : isActivelyIndexing || pendingEmbeddings > 0 ? (
             <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary border border-primary/20">
               <Loader2 className="h-3 w-3 animate-spin" />
-              Indexing {pending} new
+              Indexing {totalPendingAll} item{totalPendingAll === 1 ? "" : "s"}
             </span>
           ) : (
             <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
@@ -185,7 +263,7 @@ export function IndexingPage() {
               <Progress value={percent} className="h-2" />
             </div>
 
-            {/* Metric Chips */}
+            {/* Compact Metric Chips */}
             <div className="mt-5 grid grid-cols-4 gap-3">
               <div className="rounded-md border border-border bg-muted/40 p-2.5 text-center">
                 <div className="text-xs text-muted-foreground">Total</div>
@@ -202,19 +280,39 @@ export function IndexingPage() {
               </div>
 
               <div className="rounded-md border border-border bg-muted/40 p-2.5 text-center">
-                <div className="text-xs text-muted-foreground">Pending</div>
+                <div className="text-xs text-muted-foreground">Semantic Ready</div>
                 <div className="mt-0.5 text-base font-semibold text-foreground">
-                  {pending.toLocaleString()}
+                  {embeddedCount.toLocaleString()}
                 </div>
               </div>
 
               <div className="rounded-md border border-border bg-muted/40 p-2.5 text-center">
-                <div className="text-xs text-muted-foreground">Failed</div>
-                <div className="mt-0.5 text-base font-semibold text-rose-500">
-                  {failed.toLocaleString()}
+                <div className="text-xs text-muted-foreground">Pending</div>
+                <div className="mt-0.5 text-base font-semibold text-foreground">
+                  {totalPendingAll.toLocaleString()}
                 </div>
               </div>
             </div>
+
+            {/* Failed Notice */}
+            {failed > 0 && (
+              <div className="mt-3 flex items-center justify-between rounded-md border border-rose-200 bg-rose-50/50 p-2.5 text-xs text-rose-700 dark:border-rose-900/40 dark:bg-rose-950/20 dark:text-rose-400">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>{failed} screenshot(s) failed OCR indexing</span>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRetryFailed}
+                  disabled={isRetrying}
+                  className="h-7 gap-1 text-xs border-rose-300 dark:border-rose-800"
+                >
+                  <RotateCcw className={`h-3 w-3 ${isRetrying ? "animate-spin" : ""}`} />
+                  {isRetrying ? "Retrying..." : "Retry"}
+                </Button>
+              </div>
+            )}
 
             {/* Error Message */}
             {errorMessage && (
@@ -232,19 +330,6 @@ export function IndexingPage() {
               </div>
 
               <div className="flex items-center gap-2">
-                {failed > 0 && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleRetryFailed}
-                    disabled={isRetrying}
-                    className="gap-1.5"
-                  >
-                    <RotateCcw className={`h-3.5 w-3.5 ${isRetrying ? "animate-spin" : ""}`} />
-                    {isRetrying ? "Retrying..." : `Retry Failed (${failed})`}
-                  </Button>
-                )}
-
                 <Button
                   variant={isPaused ? "default" : "outline"}
                   size="sm"
@@ -268,6 +353,117 @@ export function IndexingPage() {
                 </Button>
               </div>
             </div>
+          </div>
+
+          {/* Phase 3: Semantic Embeddings Card */}
+          <div className="rounded-lg border border-border bg-card p-6 shadow-xs">
+            <div className="flex items-center justify-between pb-4 border-b border-border">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted text-primary">
+                  <Sparkles className="h-5 w-5" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold text-foreground">
+                    Local Semantic Search (AI Embeddings)
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    Natural-language understanding running 100% locally on CPU without external APIs
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                {isModelReady ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                    <CheckCircle2 className="h-3 w-3" />
+                    Ready
+                  </span>
+                ) : isModelDownloading ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary border border-primary/20">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Downloading
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground border border-border">
+                    Not Installed
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {!isModelReady ? (
+              /* Model Download Callout */
+              <div className="mt-5 space-y-4">
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  To search screenshots conceptually (e.g. searching <em>"lỗi database"</em> to find a <em>PrismaClientKnownRequestError</em>), download the compact multilingual model (~{modelInfo?.approximateSizeMb ?? 135} MB). It runs entirely on your CPU with zero network inference.
+                </p>
+                <div className="flex items-center gap-3">
+                  <Button
+                    size="sm"
+                    onClick={handleDownloadModel}
+                    disabled={isModelDownloading}
+                    className="gap-2 text-xs"
+                  >
+                    {isModelDownloading ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Downloading model files...
+                      </>
+                    ) : (
+                      <>
+                        <Download className="h-3.5 w-3.5" />
+                        Download Model (~{modelInfo?.approximateSizeMb ?? 135} MB)
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              /* Model Installed & Ready */
+              <div className="mt-5 space-y-4">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium text-foreground">
+                      {embeddedCount.toLocaleString()} / {succeeded.toLocaleString()} screenshots vectorized
+                    </span>
+                    <span className="text-muted-foreground font-mono">{semanticPercent}%</span>
+                  </div>
+                  <Progress value={semanticPercent} className="h-2" />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-muted-foreground">
+                  <div className="flex items-center justify-between bg-muted/30 p-2.5 rounded">
+                    <span>Model Architecture:</span>
+                    <span className="font-mono text-foreground font-medium">
+                      multilingual-e5-small (384-d)
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between bg-muted/30 p-2.5 rounded">
+                    <span>Local Runtime:</span>
+                    <span className="font-medium text-foreground flex items-center gap-1">
+                      <Cpu className="h-3 w-3 text-primary" />
+                      CPU In-Process
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-3 border-t border-border text-xs">
+                  <span className="text-muted-foreground">
+                    Vectors update automatically after OCR completes.
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleRebuildEmbeddings}
+                    disabled={isRebuildingEmbeddings}
+                    className="h-7 gap-1.5 text-xs"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${isRebuildingEmbeddings ? "animate-spin" : ""}`} />
+                    {isRebuildingEmbeddings ? "Rebuilding..." : "Rebuild Embeddings"}
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Engine Diagnostics & Language Support */}
@@ -314,7 +510,7 @@ export function IndexingPage() {
             </div>
           )}
 
-          {/* Privacy & Engine Information */}
+          {/* Privacy & Zero-Cloud Guarantee */}
           <div className="rounded-lg border border-border bg-muted/20 p-4">
             <div className="flex items-start gap-3">
               <ShieldCheck className="h-5 w-5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
@@ -323,8 +519,8 @@ export function IndexingPage() {
                   Zero Cloud Transmission &amp; Local Execution
                 </h3>
                 <p className="text-xs leading-relaxed text-muted-foreground">
-                  Text recognition and search indexing run 100% on your local machine.
-                  No screenshot bytes, extracted text, or search queries ever leave your computer.
+                  OCR recognition, vector generation, and search indexing run 100% on your local machine.
+                  No screenshot images, extracted text, embeddings, or queries are ever sent to the cloud.
                 </p>
               </div>
             </div>

@@ -44,18 +44,36 @@ Persistence
 SQLite + FTS5
 ```
 
-Future:
+Phase 3 Hybrid Search Architecture:
 
 ```text
-Search Service
-   |
-   +-------------------+
-   |                   |
-Keyword Search    Semantic Search
-   |                   |
- FTS5             Embeddings
-                       |
-                   Vector Index
+Query
+  |
+  +-----------------------------------+
+  |                                   |
+  v                                   v
+SQLite FTS5 (Top 100)        Local Embedding Model
+(BM25 normalized)             `multilingual-e5-small`
+                                      |
+                                      v
+                             In-Process Cosine Scan
+                             SQLite BLOB Vectors (Top 100)
+                                      |
+  +-----------------------------------+
+  |
+  v
+Union Candidate Set
+  |
+  v
+Hybrid Ranker
+  ├── Exact Technical Token Guard (4.0x dominance)
+  ├── Filename Matching (2.0x boost)
+  ├── Normalized FTS Score (1.5x)
+  ├── Normalized Semantic Score (1.2x)
+  └── Recency Tiebreak
+  |
+  v
+Paginated Ranked Results (Top 50)
 ```
 
 ---

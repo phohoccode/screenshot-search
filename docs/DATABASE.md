@@ -142,24 +142,26 @@ RETURNING id, folder_id, screenshot_id, path, job_type, status, dedupe_key, atte
 
 ### screenshot_embeddings
 
-Future phase:
+Implemented in **Migration v4** for local semantic text search:
 
-```text
-screenshot_id
-model_id
-model_version
-embedding_type
-vector
-created_at
+```sql
+CREATE TABLE IF NOT EXISTS screenshot_embeddings (
+    screenshot_id INTEGER PRIMARY KEY,
+    model_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(screenshot_id) REFERENCES screenshots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_screenshot_embeddings_model 
+    ON screenshot_embeddings(model_id, model_version);
 ```
 
-Possible embedding types:
-
-```text
-OCR_TEXT
-VISUAL
-CAPTION
-```
+Properties:
+- **Primary Key:** `screenshot_id` with `ON DELETE CASCADE` guarantees atomic deletion when screenshot records are removed.
+- **Vector format:** Little-endian binary `f32` floats (384 dimensions $\times$ 4 bytes = 1,536 bytes per vector).
+- **Model Versioning:** `model_id` and `model_version` isolate embeddings so models can be upgraded or rebuilt cleanly without mixing stale vectors.
 
 ---
 

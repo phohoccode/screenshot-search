@@ -6,10 +6,12 @@ use crate::db::screenshots::{self, ScreenshotDetail, SearchIndexHealth};
 use crate::errors::{AppError, CommandResult};
 use crate::search::{self, SearchRequest, SearchResultPage};
 
-/// Executes full-text search against the SQLite FTS5 index.
+/// Executes search against screenshots, preferring hybrid ranking (FTS5 + semantic embeddings)
+/// when the local model is installed, and seamlessly falling back to FTS5 keyword search otherwise.
 #[tauri::command]
 pub fn search_screenshots(
     db: State<'_, Database>,
+    service: State<'_, std::sync::Arc<crate::indexing::service::IndexingService>>,
     query: String,
     folder_id: Option<i64>,
     limit: Option<usize>,
@@ -27,6 +29,19 @@ pub fn search_screenshots(
         offset,
     };
 
+    // If query has searchable text and local semantic model is ready, execute two-stage hybrid search
+    if !req.query.trim().is_empty() {
+        if let Some(engine) = service.semantic_mgr().get_engine() {
+            match search::search_hybrid(&conn, engine.as_ref(), &req) {
+                Ok(hybrid_page) => return Ok(hybrid_page),
+                Err(err) => {
+                    log::warn!("Hybrid search encountered error, falling back to FTS5: {err}");
+                }
+            }
+        }
+    }
+
+    // Default/fallback to SQLite FTS5 search
     search::search_screenshots(&conn, &req)
 }
 
@@ -180,4 +195,49 @@ pub fn check_search_index_health(db: State<'_, Database>) -> CommandResult<Searc
         .map_err(|e| AppError::database(format!("Failed to acquire database lock: {e}")))?;
 
     screenshots::check_search_index_health(&conn)
+}
+
+/// Retrieves status and information about the local semantic model.
+#[tauri::command]
+pub fn get_semantic_model_info(
+    service: State<'_, std::sync::Arc<crate::indexing::service::IndexingService>>,
+) -> CommandResult<crate::semantic::SemanticModelInfo> {
+    Ok(service.semantic_mgr().get_model_info())
+}
+
+/// Triggers on-demand background download of the semantic embedding model.
+#[tauri::command]
+pub fn download_semantic_model(
+    app: tauri::AppHandle,
+    service: State<'_, std::sync::Arc<crate::indexing::service::IndexingService>>,
+) -> CommandResult<bool> {
+    let service_clone = service.inner().clone();
+    let app_clone = app.clone();
+
+    service
+        .semantic_mgr()
+        .start_download(Some(std::sync::Arc::new(move || {
+            use tauri::Emitter;
+            log::info!("Semantic model ready. Triggering embedding reconciliation...");
+            let _ = service_clone.reconcile_pending_embeddings();
+            let _ = app_clone.emit("semantic_model_ready", ());
+        })))?;
+
+    Ok(true)
+}
+
+/// Rebuilds the semantic embedding index from existing OCR results without re-OCR.
+#[tauri::command]
+pub fn rebuild_semantic_index(
+    service: State<'_, std::sync::Arc<crate::indexing::service::IndexingService>>,
+) -> CommandResult<usize> {
+    service.rebuild_semantic_index()
+}
+
+/// Retrieves aggregated metrics regarding semantic embedding coverage.
+#[tauri::command]
+pub fn get_embedding_stats(
+    service: State<'_, std::sync::Arc<crate::indexing::service::IndexingService>>,
+) -> CommandResult<crate::db::embeddings::EmbeddingStats> {
+    service.get_embedding_stats()
 }

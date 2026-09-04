@@ -1002,7 +1002,7 @@ fn test_burst_copy_fifty_plus_images() {
         thread::sleep(Duration::from_millis(50));
         let conn_guard = db.conn.lock().unwrap();
         let stats = jobs::get_job_stats(&conn_guard).unwrap();
-        if stats.succeeded == BURST_COUNT && stats.pending == 0 {
+        if stats.succeeded >= BURST_COUNT && stats.pending == 0 {
             all_completed = true;
             break;
         }

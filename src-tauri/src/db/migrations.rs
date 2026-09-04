@@ -83,6 +83,21 @@ const MIGRATIONS: &[Migration] = &[
             CREATE INDEX IF NOT EXISTS idx_index_jobs_screenshot_id ON index_jobs(screenshot_id);
         ",
     },
+    Migration {
+        version: 4,
+        sql: "
+            CREATE TABLE IF NOT EXISTS screenshot_embeddings (
+                screenshot_id INTEGER PRIMARY KEY REFERENCES screenshots(id) ON DELETE CASCADE,
+                model_id TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_screenshot_embeddings_model 
+                ON screenshot_embeddings(model_id, model_version);
+        ",
+    },
 ];
 
 /// Backfills existing SUCCEEDED screenshots into the FTS5 index upon migration to v2.

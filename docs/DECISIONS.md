@@ -335,6 +335,73 @@ For Phase 2 automatic background indexing, decouple filesystem notifications fro
 
 ---
 
+## ADR-015 — Local Text Embedding Model Selection and Runtime (`multilingual-e5-small` via ONNX Runtime)
+
+**Status:** Accepted
+
+### Decision
+
+For Phase 3 semantic text retrieval, use `intfloat/multilingual-e5-small` (384-dimensional vector, ~135 MB) executed locally on the CPU using embedded ONNX Runtime via the Rust `fastembed` crate.
+
+### Reasons
+
+- **Multilingual English + Vietnamese Support:** The `multilingual-e5-small` model is pretrained across 100 languages, demonstrating strong cross-lingual alignment (e.g. Vietnamese queries retrieving English technical screenshots).
+- **Embedded In-Process Execution:** Integrates directly into Rust via ONNX Runtime C ABI. Requires no Python, no PyTorch, no conda, and no child processes.
+- **Strict Local Privacy:** Model weights are downloaded directly as static data into the application data directory (`AppData/Roaming/com.screenshot-search.app/models`). Inference runs 100% locally with zero telemetry or network calls.
+- **Lightweight Desktop CPU Footprint:** With 384 dimensions and ~135 MB binary size, CPU query embedding takes ~15-25ms with minimal RAM overhead (~150MB).
+- **Asymmetric Retrieval Formulation:** Native support for `passage: ` and `query: ` prefixes optimizes retrieval quality for short technical OCR passages.
+
+### Consequences
+
+- Requires an initial one-time model download flow via UI if not already cached.
+- Transparent fallback to SQLite FTS5 keyword search is maintained if the model is absent or unavailable.
+
+---
+
+## ADR-016 — Vector Storage Strategy (SQLite BLOBs + In-Process Cosine Scan)
+
+**Status:** Accepted
+
+### Decision
+
+Persist 384-dimensional `f32` embedding vectors as raw little-endian binary SQLite `BLOB` fields in a dedicated table `screenshot_embeddings` (Migration v4) and compute cosine similarity via an in-process Rust linear scan.
+
+### Reasons
+
+- **Scale Appropriateness:** At 384 dimensions, each vector occupies 1,536 bytes (1.5 KB). For a typical personal desktop library of 10,000 screenshots, total vector storage is ~15.3 MB.
+- **Microsecond Latency:** Linear scanning 10,000 vectors with SIMD/auto-vectorized dot product takes ~1.2ms on desktop CPUs—well below the 16ms frame budget.
+- **Architectural Simplicity & Portability:** Avoids external vector databases (Qdrant, Milvus, Chroma) and non-standard native SQLite extensions that complicate cross-platform compilation.
+- **Transactional Consistency:** Stored directly in the main SQLite database with foreign key cascades on `screenshots(id) ON DELETE CASCADE`, ensuring vector deletion and invalidation are 100% atomic with file operations.
+
+### Consequences
+
+- Does not require complex ANN indexing (HNSW/IVF) for current desktop scale (<50,000 screenshots).
+- Rebuilding vectors is deterministic and can be triggered per model version without touching original OCR text.
+
+---
+
+## ADR-017 — Two-Stage Hybrid Ranking and Exact Technical Token Guard
+
+**Status:** Accepted
+
+### Decision
+
+Implement a two-stage hybrid ranker that unions the top 100 SQLite FTS5 candidates with the top 100 semantic vector candidates, normalized using reciprocal-rank and min-max curves, coupled with an Exact Technical Token Guard that grants a `4.0x` dominance signal to exact code tokens.
+
+### Reasons
+
+- **Never Degrade Technical Queries:** Queries containing error codes (`P2028`), status codes (`HTTP 500`), or technical constants (`ERR_MODULE_NOT_FOUND`) must not be displaced by loose semantic similarities. The exact token guard ensures technical tokens always rank #1.
+- **Semantic-Only Recall:** Screenshots with zero keyword overlap (e.g., query `"lỗi database"` vs OCR `"PrismaClientKnownRequestError: Transaction already closed"`) successfully appear in top results due to semantic cosine scoring.
+- **Normalized Multi-Modal Signals:** FTS5 BM25 score (lower is better) and Cosine similarity (higher is better) are normalized to $[0.0, 1.0]$ scales:
+  $$\text{Score}_{\text{final}} = 4.0 \cdot \text{exact} + 2.0 \cdot \text{filename} + 1.5 \cdot \text{fts}_{\text{norm}} + 1.2 \cdot \text{sem}_{\text{norm}} + \text{recency}$$
+
+### Consequences
+
+- Both keyword search and conceptual natural language search work seamlessly together.
+- Search result cards inform the user of match origin (`Exact`, `Meaning`, or `Hybrid`).
+
+---
+
 ## ADR Template
 
 Use this template for future decisions.
@@ -357,3 +424,4 @@ Consequences:
 Alternatives considered:
 ...
 ```
+

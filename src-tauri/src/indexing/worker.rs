@@ -8,13 +8,14 @@ use std::thread;
 use std::time::Duration;
 
 use crate::db::connection::Database;
-use crate::db::jobs::{self, IndexJobRecord, JOB_TYPE_DELETE, JOB_TYPE_UPSERT};
+use crate::db::jobs::{self, IndexJobRecord, JOB_TYPE_DELETE, JOB_TYPE_EMBEDDING, JOB_TYPE_UPSERT};
 use crate::db::screenshots;
 use crate::errors::AppError;
 use crate::filesystem::fingerprint::compute_sha256;
 use crate::filesystem::metadata::DiscoveredFileMetadata;
 use crate::ocr::engine::OcrEngine;
 use crate::ocr::normalize::normalize_ocr_text;
+use crate::semantic::SemanticModelManager;
 
 /// Processes a single claimed `UPSERT_SCREENSHOT` job.
 /// Follows strict reliability & atomic search consistency invariants:
@@ -26,6 +27,7 @@ use crate::ocr::normalize::normalize_ocr_text;
 fn process_upsert_job(
     conn: &Connection,
     engine: &dyn OcrEngine,
+    semantic_mgr: Option<&SemanticModelManager>,
     job: &IndexJobRecord,
 ) -> Result<i64, AppError> {
     let path_obj = Path::new(&job.path);
@@ -75,6 +77,7 @@ fn process_upsert_job(
                     &meta.modified_at_fs,
                     &content_hash,
                 )?;
+                let _ = crate::db::embeddings::delete_embedding(conn, existing.id);
                 (existing.id, true)
             }
         }
@@ -136,6 +139,24 @@ fn process_upsert_job(
         ))
     })?;
 
+    // 5. If semantic model is available, enqueue GENERATE_TEXT_EMBEDDING
+    if let Some(mgr) = semantic_mgr {
+        if mgr.get_engine().is_some() {
+            let dedupe_key = jobs::build_embedding_dedupe_key(
+                screenshot_id,
+                &content_hash,
+                crate::semantic::DEFAULT_MODEL_VERSION,
+            );
+            let _ = jobs::enqueue_embedding_job(
+                conn,
+                job.folder_id,
+                screenshot_id,
+                &job.path,
+                &dedupe_key,
+            );
+        }
+    }
+
     Ok(screenshot_id)
 }
 
@@ -155,7 +176,7 @@ fn process_delete_job(conn: &Connection, job: &IndexJobRecord) -> Result<(), App
             return Ok(());
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            // Genuine deletion: delete screenshot record (cascades to screenshots_fts)
+            // Genuine deletion: delete screenshot record (cascades to screenshots_fts & screenshot_embeddings)
             if let Some(existing) = screenshots::get_screenshot_by_path(conn, &job.path)? {
                 screenshots::delete_screenshot(conn, existing.id)?;
                 log::info!(
@@ -176,15 +197,84 @@ fn process_delete_job(conn: &Connection, job: &IndexJobRecord) -> Result<(), App
     }
 }
 
+/// Processes a single claimed `GENERATE_TEXT_EMBEDDING` job.
+/// Generates semantic vector and persists to screenshot_embeddings table.
+fn process_embedding_job(
+    conn: &Connection,
+    semantic_mgr: Option<&SemanticModelManager>,
+    job: &IndexJobRecord,
+) -> Result<Option<i64>, AppError> {
+    let mgr = semantic_mgr.ok_or_else(|| {
+        AppError::unknown("Semantic model manager not configured in indexing worker")
+    })?;
+
+    let engine = mgr.get_engine().ok_or_else(|| {
+        AppError::unknown("Semantic model is not currently installed or available")
+    })?;
+
+    // Determine screenshot ID: either job.screenshot_id or look up by path
+    let screenshot_id = match job.screenshot_id {
+        Some(id) => id,
+        None => {
+            let s = screenshots::get_screenshot_by_path(conn, &job.path)?.ok_or_else(|| {
+                AppError::file_not_found(format!(
+                    "Screenshot not found for embedding: {}",
+                    job.path
+                ))
+            })?;
+            s.id
+        }
+    };
+
+    let detail = screenshots::get_screenshot_by_id(conn, screenshot_id)?.ok_or_else(|| {
+        AppError::file_not_found(format!("Screenshot ID {screenshot_id} not found"))
+    })?;
+
+    if detail.ocr_status != "SUCCEEDED" {
+        log::debug!("Skipping embedding for screenshot {screenshot_id}: OCR not SUCCEEDED");
+        return Ok(Some(screenshot_id));
+    }
+
+    let ocr_text = detail.ocr_text.unwrap_or_default();
+    let doc_text = crate::semantic::format_semantic_document(&detail.filename, &ocr_text, None);
+
+    // 1. Run inference outside DB lock
+    let vector = engine.embed_passage(&doc_text)?;
+
+    // 2. Persist vector in short SQLite write
+    crate::db::embeddings::save_embedding(
+        conn,
+        screenshot_id,
+        engine.model_id(),
+        engine.model_version(),
+        &vector,
+    )?;
+
+    log::debug!("Generated semantic embedding for screenshot {screenshot_id}");
+    Ok(Some(screenshot_id))
+}
+
 /// Executes a single index job step against the provided database connection and OCR engine.
+/// Backward-compatible wrapper for testing.
 pub fn run_indexing_worker_loop_step(
     conn: &Connection,
     engine: &dyn OcrEngine,
     job: &IndexJobRecord,
 ) -> Result<Option<i64>, AppError> {
+    run_indexing_worker_loop_step_with_semantic(conn, engine, None, job)
+}
+
+/// Executes a single index job step with OCR and optional semantic model manager.
+pub fn run_indexing_worker_loop_step_with_semantic(
+    conn: &Connection,
+    engine: &dyn OcrEngine,
+    semantic_mgr: Option<&SemanticModelManager>,
+    job: &IndexJobRecord,
+) -> Result<Option<i64>, AppError> {
     match job.job_type.as_str() {
-        JOB_TYPE_UPSERT => process_upsert_job(conn, engine, job).map(Some),
+        JOB_TYPE_UPSERT => process_upsert_job(conn, engine, semantic_mgr, job).map(Some),
         JOB_TYPE_DELETE => process_delete_job(conn, job).map(|_| None),
+        JOB_TYPE_EMBEDDING => process_embedding_job(conn, semantic_mgr, job),
         unknown => Err(AppError::unknown(format!(
             "Unknown index job type: {unknown}"
         ))),
@@ -195,6 +285,7 @@ pub fn run_indexing_worker_loop_step(
 pub fn run_indexing_worker_loop(
     db: Database,
     engine: Arc<dyn OcrEngine>,
+    semantic_mgr: Option<Arc<SemanticModelManager>>,
     is_paused: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
     on_job_completed: Option<Arc<dyn Fn(i64, &str) + Send + Sync>>,
@@ -251,7 +342,12 @@ pub fn run_indexing_worker_loop(
         let process_result = {
             let conn_guard = db.conn.lock();
             match conn_guard {
-                Ok(conn) => run_indexing_worker_loop_step(&conn, engine.as_ref(), &job),
+                Ok(conn) => run_indexing_worker_loop_step_with_semantic(
+                    &conn,
+                    engine.as_ref(),
+                    semantic_mgr.as_deref(),
+                    &job,
+                ),
                 Err(e) => Err(AppError::database(format!("Failed to lock DB: {e}"))),
             }
         };

@@ -4,12 +4,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crate::db::connection::Database;
+use crate::db::embeddings::{self, EmbeddingStats};
 use crate::db::folders;
 use crate::db::jobs::{self, IndexJobStats, JOB_TYPE_UPSERT};
 use crate::errors::AppError;
 use crate::indexing::discovery::execute_discovery_scan;
 use crate::indexing::worker::run_indexing_worker_loop;
 use crate::ocr::engine::OcrEngine;
+use crate::semantic::SemanticModelManager;
 use crate::watcher::WatcherManager;
 
 /// High-level status of the automatic background indexing service.
@@ -20,12 +22,14 @@ pub struct IndexingServiceStatus {
     pub is_paused: bool,
     pub active_watchers_count: usize,
     pub stats: IndexJobStats,
+    pub semantic_stats: Option<EmbeddingStats>,
 }
 
 /// Central service coordinating filesystem watching, startup reconciliation, and durable background indexing.
 pub struct IndexingService {
     db: Database,
     engine: Arc<dyn OcrEngine>,
+    semantic_mgr: Arc<SemanticModelManager>,
     watcher: Arc<WatcherManager>,
     is_paused: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
@@ -33,15 +37,31 @@ pub struct IndexingService {
 }
 
 impl IndexingService {
-    /// Initializes the IndexingService and its components.
+    /// Initializes IndexingService with a default/standalone semantic manager.
     pub fn new(
         db: Database,
         engine: Arc<dyn OcrEngine>,
         watcher: Arc<WatcherManager>,
     ) -> Arc<Self> {
+        Self::with_semantic(
+            db,
+            engine,
+            SemanticModelManager::new(&std::path::PathBuf::from("models")),
+            watcher,
+        )
+    }
+
+    /// Initializes IndexingService with an explicit SemanticModelManager instance.
+    pub fn with_semantic(
+        db: Database,
+        engine: Arc<dyn OcrEngine>,
+        semantic_mgr: Arc<SemanticModelManager>,
+        watcher: Arc<WatcherManager>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             db,
             engine,
+            semantic_mgr,
             watcher,
             is_paused: Arc::new(AtomicBool::new(false)),
             stop_flag: Arc::new(AtomicBool::new(false)),
@@ -54,6 +74,7 @@ impl IndexingService {
     pub fn start(self: &Arc<Self>, on_job_completed: Option<Arc<dyn Fn(i64, &str) + Send + Sync>>) {
         let db_clone = self.db.clone();
         let engine_clone = self.engine.clone();
+        let semantic_mgr_clone = self.semantic_mgr.clone();
         let is_paused_clone = self.is_paused.clone();
         let stop_flag_clone = self.stop_flag.clone();
 
@@ -64,6 +85,7 @@ impl IndexingService {
                 run_indexing_worker_loop(
                     db_clone,
                     engine_clone,
+                    Some(semantic_mgr_clone),
                     is_paused_clone,
                     stop_flag_clone,
                     on_job_completed,
@@ -205,6 +227,125 @@ impl IndexingService {
         }
 
         log::info!("Startup reconciliation completed");
+        let _ = self.reconcile_pending_embeddings();
+    }
+
+    /// Automatically enqueues pending embedding jobs for all screenshots with ocr_status = 'SUCCEEDED'
+    /// that do not yet have an embedding for the active model.
+    pub fn reconcile_pending_embeddings(&self) -> Result<usize, AppError> {
+        let engine_opt = self.semantic_mgr.get_engine();
+        let (model_id, model_version) = match engine_opt {
+            Some(ref eng) => (eng.model_id().to_string(), eng.model_version().to_string()),
+            None => {
+                log::debug!(
+                    "Semantic model not available; skipping embedding backfill reconciliation"
+                );
+                return Ok(0);
+            }
+        };
+
+        let conn = self.db.conn.lock().map_err(|e| {
+            AppError::database(format!(
+                "Failed to acquire DB lock for embedding reconciliation: {e}"
+            ))
+        })?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.folder_id, s.path, s.content_hash
+                 FROM screenshots s
+                 LEFT JOIN screenshot_embeddings e 
+                   ON e.screenshot_id = s.id AND e.model_id = ?1 AND e.model_version = ?2
+                 WHERE s.ocr_status = 'SUCCEEDED' AND e.screenshot_id IS NULL",
+            )
+            .map_err(|e| {
+                AppError::database(format!("Failed to prepare pending embeddings query: {e}"))
+            })?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![model_id, model_version], |row| {
+                let id: i64 = row.get(0)?;
+                let folder_id: i64 = row.get(1)?;
+                let path: String = row.get(2)?;
+                let content_hash: Option<String> = row.get(3)?;
+                Ok((id, folder_id, path, content_hash))
+            })
+            .map_err(|e| AppError::database(format!("Failed to query pending embeddings: {e}")))?;
+
+        let mut enqueued_count = 0;
+        for item in rows {
+            let (screenshot_id, folder_id, path, content_hash_opt) = item.map_err(|e| {
+                AppError::database(format!("Failed to read pending embedding row: {e}"))
+            })?;
+
+            let hash = content_hash_opt.unwrap_or_else(|| "unknown".to_string());
+            let dedupe_key = jobs::build_embedding_dedupe_key(screenshot_id, &hash, &model_version);
+
+            if let Ok(Some(_)) =
+                jobs::enqueue_embedding_job(&conn, folder_id, screenshot_id, &path, &dedupe_key)
+            {
+                enqueued_count += 1;
+            }
+        }
+
+        if enqueued_count > 0 {
+            log::info!("Enqueued {enqueued_count} pending semantic embedding job(s) for model {model_id} {model_version}");
+        }
+
+        Ok(enqueued_count)
+    }
+
+    /// Clears existing vectors for the active model and enqueues all SUCCEEDED screenshots for re-embedding.
+    pub fn rebuild_semantic_index(&self) -> Result<usize, AppError> {
+        let (model_id, model_version) = {
+            let engine_opt = self.semantic_mgr.get_engine();
+            match engine_opt {
+                Some(ref eng) => (eng.model_id().to_string(), eng.model_version().to_string()),
+                None => (
+                    crate::semantic::DEFAULT_MODEL_ID.to_string(),
+                    crate::semantic::DEFAULT_MODEL_VERSION.to_string(),
+                ),
+            }
+        };
+
+        {
+            let conn = self.db.conn.lock().map_err(|e| {
+                AppError::database(format!("Failed to acquire DB lock for rebuild: {e}"))
+            })?;
+            let cleared = embeddings::clear_embeddings_by_model(&conn, &model_id, &model_version)?;
+            log::info!(
+                "Cleared {cleared} existing embeddings for model {model_id} {model_version}"
+            );
+        }
+
+        self.reconcile_pending_embeddings()
+    }
+
+    /// Access the SemanticModelManager.
+    pub fn semantic_mgr(&self) -> &Arc<SemanticModelManager> {
+        &self.semantic_mgr
+    }
+
+    /// Retrieves metrics regarding semantic embedding coverage.
+    pub fn get_embedding_stats(&self) -> Result<embeddings::EmbeddingStats, AppError> {
+        let (model_id, model_version) = {
+            let engine_opt = self.semantic_mgr.get_engine();
+            match engine_opt {
+                Some(ref eng) => (eng.model_id().to_string(), eng.model_version().to_string()),
+                None => (
+                    crate::semantic::DEFAULT_MODEL_ID.to_string(),
+                    crate::semantic::DEFAULT_MODEL_VERSION.to_string(),
+                ),
+            }
+        };
+
+        let conn = self.db.conn.lock().map_err(|e| {
+            AppError::database(format!(
+                "Failed to acquire DB lock for embedding stats: {e}"
+            ))
+        })?;
+
+        embeddings::get_embedding_stats(&conn, &model_id, &model_version)
     }
 
     /// Pauses background indexing. The watcher continues capturing events into the durable queue,
@@ -258,11 +399,24 @@ impl IndexingService {
                 .count()
         };
 
+        let semantic_stats = {
+            let conn = self.db.conn.lock().ok();
+            conn.and_then(|c| {
+                embeddings::get_embedding_stats(
+                    &c,
+                    crate::semantic::DEFAULT_MODEL_ID,
+                    crate::semantic::DEFAULT_MODEL_VERSION,
+                )
+                .ok()
+            })
+        };
+
         Ok(IndexingServiceStatus {
             is_running: !self.stop_flag.load(Ordering::SeqCst),
             is_paused: self.is_paused.load(Ordering::SeqCst),
             active_watchers_count,
             stats,
+            semantic_stats,
         })
     }
 

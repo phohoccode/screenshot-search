@@ -63,19 +63,19 @@ ORDER BY bm25(screenshots_fts, 5.0, 1.0) ASC, s.modified_at_fs DESC
 - Recency tiebreaker: among identical relevance scores, newer screenshots rank first.
 - Safe Snippets: FTS5 `snippet()` wraps matched tokens with `[[match]]...[[/match]]`. The frontend parses these markers into React text nodes, preventing any HTML injection vulnerability.
 
-Future conceptual hybrid score:
+## 5. Phase 3 — Hybrid Search (Implemented)
 
-```text
-final_score =
-    keyword_weight * keyword_score
-  + semantic_weight * semantic_score
-  + filename_weight * filename_score
-  + recency_weight * recency_score
-```
-
-Weights must be tuned using test queries.
-
-Do not hardcode arbitrary weights and treat them as final.
+Technology:
+- Two-stage candidate retrieval: Union of top 100 SQLite FTS5 candidates + top 100 semantic vector candidates (in-process cosine scan).
+- Score normalization:
+  - FTS5 BM25 ($bm25 \le 0$): Normalized via reciprocal rank: $pos = -bm25$, $\text{norm} = \frac{pos}{1.0 + pos} \in [0.0, 1.0]$.
+  - Semantic Cosine ($[-1.0, 1.0]$): Normalized via min-max: $\text{norm} = \frac{\text{cosine} + 1.0}{2.0} \in [0.0, 1.0]$.
+- Exact Technical Token Guard:
+  Detects alphanumeric error codes, HTTP codes, uppercase abbreviations, and identifiers (`P2028`, `ERR_MODULE_NOT_FOUND`, `HTTP 500`). Grants a massive `4.0x` exact signal boost when an exact token is matched, guaranteeing technical tokens dominate rank #1.
+- Hybrid Ranking Formula:
+  $$\text{FinalScore} = 4.0 \cdot \text{exact\_signal} + 2.0 \cdot \text{filename\_signal} + 1.5 \cdot \text{fts\_score} + 1.2 \cdot \text{semantic\_score} + \text{recency\_tiebreak}$$
+- Transparent Fallback:
+  If the semantic model is not downloaded or unavailable, search falls back seamlessly to SQLite FTS5 without error.
 
 ---
 

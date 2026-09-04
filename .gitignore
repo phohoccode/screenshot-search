@@ -33,7 +33,10 @@ desktop.ini
 *.sqlite-shm
 *.db
 *.db-journal
+models/
+*.onnx
 
 # Logs
 *.log
 npm-debug.log*
+

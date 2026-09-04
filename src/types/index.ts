@@ -77,6 +77,32 @@ export interface SearchResultItem {
   height?: number | null;
   matchSnippet?: string | null;
   score: number;
+  matchType?: "exact" | "keyword" | "semantic" | "hybrid" | null;
+}
+
+/** Aggregated metrics for semantic embedding coverage */
+export interface EmbeddingStats {
+  totalSucceeded: number;
+  embeddedCount: number;
+  pendingCount: number;
+  activeModelId: string;
+  activeModelVersion: string;
+}
+
+export type SemanticModelStatus =
+  | { status: "notInstalled" }
+  | { status: "downloading"; percent: number }
+  | { status: "ready" }
+  | { status: "error"; message: string };
+
+/** Diagnostic info about local semantic embedding model */
+export interface SemanticModelInfo {
+  modelId: string;
+  modelVersion: string;
+  dimension: number;
+  status: SemanticModelStatus;
+  isAvailable: boolean;
+  approximateSizeMb: number;
 }
 
 /** Paginated search response */
@@ -119,6 +145,7 @@ export interface IndexingServiceStatus {
   isPaused: boolean;
   activeWatchersCount: number;
   stats: IndexJobStats;
+  semanticStats?: EmbeddingStats | null;
 }
 
 export interface IndexingJobCompletedPayload {

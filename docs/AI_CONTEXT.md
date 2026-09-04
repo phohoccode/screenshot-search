@@ -138,45 +138,26 @@ For ordinary UI screenshots, whole-document embedding may be sufficient.
 
 ---
 
-## 7. Vector Storage
+## 7. Vector Storage (Implemented)
 
-Initial semantic phase should remain local.
-
-Potential approaches:
-
-- vectors stored in SQLite
-- SQLite vector extension
-- lightweight embedded vector index
-
-Avoid introducing:
-
-- Pinecone
-- remote Qdrant
-- remote Weaviate
-
-for a local-first desktop MVP.
+Phase 3 implements local SQLite BLOB storage:
+- Table: `screenshot_embeddings` (Migration v4)
+- Representation: Little-endian binary `f32` vectors (384 dimensions = 1,536 bytes/vector).
+- Linear Scan: In-process Rust cosine similarity calculation.
+- Performance: ~1.2ms for 10,000 vectors on CPU. No remote services, no native SQLite extension compile hurdles.
 
 ---
 
-## 8. Hybrid Search
+## 8. Hybrid Search (Implemented)
 
-Semantic search complements keyword search.
+Semantic search complements FTS5 keyword search.
+Implemented model: `intfloat/multilingual-e5-small` (384 dimensions, MIT license).
+- Text formulation: `passage: Filename: <name>\nContent:\n<text>`
+- Query formulation: `query: <query>`
+- Two-stage candidate generation: Union top 100 FTS5 + top 100 Semantic vectors.
+- Exact Token Guard: `4.0x` dominance signal for exact alphanumeric/code tokens.
+- Fallback: Transparent zero-degradation fallback to FTS5 if model is absent.
 
-Conceptual ranking:
-
-```text
-keyword results
-        +
-semantic results
-        |
-        v
-normalization
-        |
-        v
-hybrid ranker
-```
-
-Important:
 
 - exact filename match should receive a strong signal
 - exact error-code match should receive a strong signal

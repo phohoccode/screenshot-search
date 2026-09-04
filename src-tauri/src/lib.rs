@@ -5,6 +5,7 @@ pub mod filesystem;
 pub mod indexing;
 pub mod ocr;
 pub mod search;
+pub mod semantic;
 pub mod watcher;
 
 use tauri::Manager;
@@ -90,6 +91,10 @@ pub fn run() {
             commands::reveal_screenshot,
             commands::rebuild_search_index,
             commands::check_search_index_health,
+            commands::get_semantic_model_info,
+            commands::download_semantic_model,
+            commands::rebuild_semantic_index,
+            commands::get_embedding_stats,
         ])
         .setup(|app| {
             let app_data_dir = app
@@ -115,10 +120,12 @@ pub fn run() {
             let ocr_engine: std::sync::Arc<dyn ocr::engine::OcrEngine> =
                 std::sync::Arc::new(ocr::mock::MockOcrEngine::new());
 
+            let semantic_mgr = semantic::SemanticModelManager::new(&app_data_dir);
             let watcher_manager = watcher::WatcherManager::new(database.clone());
-            let indexing_service = indexing::service::IndexingService::new(
+            let indexing_service = indexing::service::IndexingService::with_semantic(
                 database.clone(),
                 ocr_engine,
+                semantic_mgr,
                 watcher_manager,
             );
 

@@ -13,6 +13,8 @@ import type {
   SearchIndexHealth,
   IndexingServiceStatus,
   IndexingJobCompletedPayload,
+  SemanticModelInfo,
+  EmbeddingStats,
   AppError,
 } from "@/types";
 
@@ -480,3 +482,59 @@ export async function onIndexingCompleted(
   }
   return () => {};
 }
+
+/** Retrieves status of the local semantic embedding model */
+export async function getSemanticModelInfo(): Promise<SemanticModelInfo> {
+  if (isTauri()) {
+    return await invoke<SemanticModelInfo>("get_semantic_model_info");
+  }
+  return {
+    modelId: "multilingual-e5-small",
+    modelVersion: "v1",
+    dimension: 384,
+    status: { status: "ready" },
+    isAvailable: true,
+    approximateSizeMb: 135,
+  };
+}
+
+/** Initiates user-requested download of the semantic embedding model */
+export async function downloadSemanticModel(): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("download_semantic_model");
+  }
+  return true;
+}
+
+/** Rebuilds the semantic embedding index for the active model without re-running OCR */
+export async function rebuildSemanticIndex(): Promise<number> {
+  if (isTauri()) {
+    return await invoke<number>("rebuild_semantic_index");
+  }
+  return 0;
+}
+
+/** Retrieves aggregated metrics regarding semantic embedding coverage */
+export async function getEmbeddingStats(): Promise<EmbeddingStats> {
+  if (isTauri()) {
+    return await invoke<EmbeddingStats>("get_embedding_stats");
+  }
+  return {
+    totalSucceeded: 3,
+    embeddedCount: 3,
+    pendingCount: 0,
+    activeModelId: "multilingual-e5-small",
+    activeModelVersion: "v1",
+  };
+}
+
+/** Subscribes to events when the semantic model completes downloading and initialization */
+export async function onSemanticModelReady(
+  callback: () => void
+): Promise<UnlistenFn> {
+  if (isTauri()) {
+    return await listen("semantic_model_ready", () => callback());
+  }
+  return () => {};
+}
+

@@ -28,6 +28,8 @@ pub struct SearchResultItem {
     pub height: Option<u32>,
     pub match_snippet: Option<String>,
     pub score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<String>,
 }
 
 /// Paginated search result page.
@@ -143,6 +145,7 @@ pub fn search_screenshots(
                     height: row.get(7)?,
                     match_snippet: row.get(8)?,
                     score: row.get(9)?,
+                    match_type: None,
                 })
             };
 
@@ -269,6 +272,7 @@ pub fn search_screenshots(
                     height: row.get(7)?,
                     match_snippet: row.get(8)?,
                     score: normalized_score,
+                    match_type: Some("keyword".to_string()),
                 })
             };
 

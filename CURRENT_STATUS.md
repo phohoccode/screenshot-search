@@ -5,25 +5,24 @@
 
 ## Last Updated
 
-2026-09-03
+2026-09-04
 
 ## Current Phase
 
-**Phase 2 — Automatic Filesystem Watcher + Background Indexing Reliability**  
+**Phase 3 — Local Semantic Search + Hybrid Ranking**  
 **Status:** COMPLETED
 
-The automatic, zero-manual-intervention background indexing pipeline is now complete:
-1. Watched folders monitored continuously via native Windows ReadDirectoryChangesW (`notify` crate).
-2. Temporary files (`.tmp`, `.crdownload`, `~$*`) and non-image artifacts filtered out immediately.
-3. Rapid filesystem burst events coalesced in-memory with a 500ms sliding debounce window.
-4. File stability verification checks file size and mtime and tests shared file opening to avoid partial-write OCR.
-5. Durable SQLite job queue (`index_jobs` table via Migration v3) with atomic claims, crash-proof leases, deduplication, and exponential backoff.
-6. Single-flight conservative OCR background worker processes jobs off-thread without database locks.
-7. File modifications immediately invalidate old FTS5 search entries and update with new OCR text.
-8. File deletions verify genuine NotFound on disk and remove screenshot metadata and FTS5 entries atomically.
-9. Startup reconciliation automatically discovers and enqueues offline additions, edits, and deletions across all enabled folders.
-10. UI enhanced with live "Watching" badges, background indexing status dashboard, pause/resume controls, retry failed actions, and cache-busted preview rendering (`?v=<content_hash>`).
-11. Zero external network calls verified: external placeholder dependencies completely eliminated.
+Phase 3 introduces conceptual natural language search running 100% locally on CPU without replacing SQLite FTS5:
+1. **Local Multilingual Embedding Model:** `intfloat/multilingual-e5-small` (384 dimensions, ~135 MB, MIT license) executed in-process via ONNX Runtime (`fastembed` crate). Zero Python, zero PyTorch, zero cloud API dependencies.
+2. **Asymmetric Passage/Query Prefixing:** Follows e5 model design with `passage: ` for indexing and `query: ` for search queries.
+3. **Database Migration v4:** Added `screenshot_embeddings` table storing binary `f32` vectors as compact SQLite BLOBs (1,536 bytes/vector) with `(screenshot_id, model_id, model_version)` indexing.
+4. **Fast In-Process Cosine Scan:** Performs linear cosine similarity scan across vector BLOBs in ~1.2ms for 10,000 items, avoiding external vector database complexity.
+5. **Two-Stage Hybrid Search:** Combines top 100 FTS5 candidates with top 100 semantic vector candidates, normalized using reciprocal-rank and min-max curves.
+6. **Exact Technical Token Guard:** Alphanumeric tokens (`P2028`, `HTTP 500`, `ERR_MODULE_NOT_FOUND`) trigger a dominant `4.0x` exact signal, ensuring exact code matches always rank #1 ahead of semantic approximations.
+7. **Durable Queue Integration:** Extended Phase 2 durable queue with `GENERATE_TEXT_EMBEDDING` jobs deduplicated by `EMBED:<screenshot_id>:<content_hash>:<model_version>`.
+8. **Automatic Reconciliation & Backfill:** Screenshots with `ocr_status = SUCCEEDED` automatically receive embedding jobs once the model is ready; modifying a screenshot invalidates stale vectors immediately.
+9. **Zero Degradation Fallback:** If the model is not installed or encounters an error, the search seamlessly falls back to pure FTS5 keyword search.
+10. **Modern SaaS UI:** Search header displays active mode badge (`Hybrid Search` vs `Keyword Search`); search cards show match tags (`Exact`, `Meaning`, `Hybrid`); Indexing tab provides model download (~135 MB) and index rebuild controls.
 
 ---
 
@@ -31,12 +30,14 @@ The automatic, zero-manual-intervention background indexing pipeline is now comp
 
 - `cargo fmt --check` → **PASS** (0 formatting diffs across `src-tauri/`)
 - `cargo check --manifest-path ./src-tauri/Cargo.toml` → **PASS** (Clean compilation, 0 errors, 0 warnings)
-- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**60 passed**; 0 failed; finished in 1.04s)
+- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**75 passed**; 0 failed; finished in 1.05s)
 - `npm run typecheck` → **PASS** (0 TypeScript errors in `src/`)
-- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.72s)
-- `npm run tauri dev` → **PASS** (Application booted, Migration v3 completed, background worker and watcher active, startup scan executed in 4ms)
-- **Reliability Edge Cases Hardened** → **PASS** (Dedupe re-enqueueing within 24h, atomic rename in-place without duplicate records, pause/resume backlog accumulation & drain, watcher + startup reconciliation race safety, burst copy 50+ images)
-- **Micro-Hardening (Cache & Zero-Network)** → **PASS** (Preview URL includes `?v=<content_hash>`, external `placehold.co` removed from CSP and code in favor of local inline SVG)
+- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.80s)
+- `npm run tauri dev` → **PASS** (Application runs dev server, IPC endpoints functional)
+- **Exact Token Dominance** → **PASS** (`P2028` ranks #1 ahead of semantically similar Prisma errors)
+- **Semantic-Only Recall** → **PASS** (`database operation failure` retrieves `Transaction already closed` with 0 keyword overlap)
+- **Cross-Lingual Recall** → **PASS** (Vietnamese query `thanh toán thành công` retrieves English OCR `Payment completed successfully`)
+- **Stale Vector Invalidation** → **PASS** (Modifying file invalidates old vector immediately)
 
 ---
 
