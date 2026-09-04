@@ -524,3 +524,509 @@ fn test_full_automatic_pipeline_e2e() {
 
     service.shutdown();
 }
+
+#[test]
+fn test_dedupe_key_allows_reindexing_after_succeeded_within_24h() {
+    let dir = tempdir().unwrap();
+    let folder_path = dir.path().join("dedupe_test");
+    fs::create_dir_all(&folder_path).unwrap();
+
+    let file_path = folder_path.join("reindex.png");
+    {
+        let mut f = File::create(&file_path).unwrap();
+        f.write_all(b"version 1 content").unwrap();
+    }
+
+    let conn = setup_test_db();
+    let folder_path_str = folder_path.to_string_lossy().to_string();
+    conn.execute(
+        "INSERT INTO folders (id, path, enabled, recursive) VALUES (1, ?1, 1, 1)",
+        [&folder_path_str],
+    )
+    .unwrap();
+
+    let file_str = file_path.to_string_lossy().to_string();
+
+    // 1. Enqueue job for v1 and process to SUCCEEDED
+    let hash_v1 = "hash_v1_content";
+    let key_v1 = format!("UPSERT:1:{file_str}:{hash_v1}");
+    let job1_id = jobs::enqueue_job(&conn, 1, &file_str, JOB_TYPE_UPSERT, &key_v1)
+        .unwrap()
+        .expect("Initial job should be enqueued");
+
+    let claimed1 = jobs::claim_next_job(&conn, 60).unwrap().unwrap();
+    assert_eq!(claimed1.id, job1_id);
+    let shot1_id = screenshots::insert_screenshot(
+        &conn,
+        1,
+        &file_str,
+        "reindex.png",
+        "png",
+        100,
+        "2026-09-04T00:00:00Z",
+        hash_v1,
+    )
+    .unwrap();
+    screenshots::save_ocr_success(&conn, shot1_id, "text version one", "mock").unwrap();
+    jobs::complete_job(&conn, job1_id, Some(shot1_id)).unwrap();
+
+    // Verify job is SUCCEEDED and retained for 24h
+    let stats = jobs::get_job_stats(&conn).unwrap();
+    assert_eq!(stats.succeeded, 1);
+    assert_eq!(stats.pending, 0);
+
+    // 2. Modify same path to v2 within 24h -> new job must enqueue and complete
+    {
+        let mut f = File::create(&file_path).unwrap();
+        f.write_all(b"version 2 modified content").unwrap();
+    }
+    let hash_v2 = "hash_v2_content";
+    let key_v2 = format!("UPSERT:1:{file_str}:{hash_v2}");
+    let job2_id = jobs::enqueue_job(&conn, 1, &file_str, JOB_TYPE_UPSERT, &key_v2)
+        .unwrap()
+        .expect(
+            "Modified file v2 should successfully enqueue even while v1 is retained in SUCCEEDED",
+        );
+
+    let claimed2 = jobs::claim_next_job(&conn, 60).unwrap().unwrap();
+    assert_eq!(claimed2.id, job2_id);
+    screenshots::update_screenshot(&conn, shot1_id, 200, "2026-09-04T01:00:00Z", hash_v2).unwrap();
+    screenshots::save_ocr_success(&conn, shot1_id, "text version two", "mock").unwrap();
+    jobs::complete_job(&conn, job2_id, Some(shot1_id)).unwrap();
+
+    // Verify search matches v2 and not v1
+    let res_v2 = search_screenshots(
+        &conn,
+        &SearchRequest {
+            query: "two".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res_v2.total_matches, 1);
+    let res_v1 = search_screenshots(
+        &conn,
+        &SearchRequest {
+            query: "one".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res_v1.total_matches, 0);
+
+    // 3. Modify same path BACK to v1 within 24h -> must safely re-open job and complete
+    let job3_id = jobs::enqueue_job(&conn, 1, &file_str, JOB_TYPE_UPSERT, &key_v1)
+        .unwrap()
+        .expect("Modifying back to v1 should re-open previously SUCCEEDED job");
+
+    assert_eq!(
+        job3_id, job1_id,
+        "Re-opened job should re-use existing job record ID via ON CONFLICT"
+    );
+    let claimed3 = jobs::claim_next_job(&conn, 60).unwrap().unwrap();
+    assert_eq!(claimed3.id, job1_id);
+    screenshots::update_screenshot(&conn, shot1_id, 100, "2026-09-04T02:00:00Z", hash_v1).unwrap();
+    screenshots::save_ocr_success(&conn, shot1_id, "text version one restored", "mock").unwrap();
+    jobs::complete_job(&conn, job1_id, Some(shot1_id)).unwrap();
+
+    let res_restored = search_screenshots(
+        &conn,
+        &SearchRequest {
+            query: "restored".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res_restored.total_matches, 1);
+
+    // Verify exactly 1 screenshot record exists (no duplicate)
+    let total_screenshots: i64 = conn
+        .query_row("SELECT COUNT(*) FROM screenshots", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(total_screenshots, 1);
+}
+
+#[test]
+fn test_rename_screenshot_inside_watched_folder() {
+    let dir = tempdir().unwrap();
+    let folder_path = dir.path().join("rename_test");
+    fs::create_dir_all(&folder_path).unwrap();
+
+    let old_file = folder_path.join("old_invoice.png");
+    let new_file = folder_path.join("renamed_invoice.png");
+    {
+        let mut f = File::create(&old_file).unwrap();
+        f.write_all(b"invoice document bytes").unwrap();
+    }
+
+    let conn = setup_test_db();
+    let folder_path_str = folder_path.to_string_lossy().to_string();
+    conn.execute(
+        "INSERT INTO folders (id, path, enabled, recursive) VALUES (1, ?1, 1, 1)",
+        [&folder_path_str],
+    )
+    .unwrap();
+
+    let old_str = old_file.to_string_lossy().to_string();
+    let new_str = new_file.to_string_lossy().to_string();
+
+    // 1. Initial screenshot indexed
+    let shot_id = screenshots::insert_screenshot(
+        &conn,
+        1,
+        &old_str,
+        "old_invoice.png",
+        "png",
+        1024,
+        "2026-09-04T00:00:00Z",
+        "hash_inv_123",
+    )
+    .unwrap();
+    screenshots::save_ocr_success(&conn, shot_id, "Invoice #INV-2026-99 Paid in Full", "mock")
+        .unwrap();
+
+    // Verify initial search matches
+    let res1 = search_screenshots(
+        &conn,
+        &SearchRequest {
+            query: "INV-2026-99".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res1.total_matches, 1);
+    assert_eq!(res1.items[0].filename, "old_invoice.png");
+    assert_eq!(res1.items[0].path, old_str);
+
+    // 2. Perform rename on disk: old_invoice.png -> renamed_invoice.png
+    fs::rename(&old_file, &new_file).unwrap();
+    assert!(!old_file.exists());
+    assert!(new_file.exists());
+
+    // 3. Trigger atomic rename in database
+    let renamed = screenshots::rename_screenshot(&conn, 1, &old_str, &new_str).unwrap();
+    assert!(
+        renamed,
+        "rename_screenshot should return true for registered path"
+    );
+
+    // 4. Invariant checks:
+    // A. No stale old path in database
+    let old_lookup = screenshots::get_screenshot_by_path(&conn, &old_str).unwrap();
+    assert!(
+        old_lookup.is_none(),
+        "Old path must no longer exist in screenshots table"
+    );
+
+    // B. No duplicate screenshot record (exactly 1 record, retaining original ID)
+    let total_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM screenshots", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        total_count, 1,
+        "Exactly 1 screenshot record must exist after rename"
+    );
+
+    let detail = screenshots::get_screenshot_by_id(&conn, shot_id)
+        .unwrap()
+        .expect("Original record ID must be preserved");
+    assert_eq!(detail.id, shot_id);
+    assert_eq!(detail.path, new_str);
+    assert_eq!(detail.filename, "renamed_invoice.png");
+    assert_eq!(detail.ocr_status, "SUCCEEDED");
+    assert_eq!(
+        detail.ocr_text.as_deref(),
+        Some("Invoice #INV-2026-99 Paid in Full")
+    );
+
+    // C. FTS remains consistent and search reflects new filename with old OCR text
+    let res2 = search_screenshots(
+        &conn,
+        &SearchRequest {
+            query: "INV-2026-99".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res2.total_matches, 1);
+    assert_eq!(res2.items[0].filename, "renamed_invoice.png");
+    assert_eq!(res2.items[0].path, new_str);
+
+    // Also searchable by the new filename token
+    let res_fn = search_screenshots(
+        &conn,
+        &SearchRequest {
+            query: "renamed_invoice".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res_fn.total_matches, 1);
+
+    // D. Original file content on disk is untouched
+    let on_disk_bytes = fs::read(&new_file).unwrap();
+    assert_eq!(on_disk_bytes, b"invoice document bytes");
+}
+
+#[test]
+fn test_pause_resume_accumulates_and_drains_backlog() {
+    let dir = tempdir().unwrap();
+    let folder_path = dir.path().join("pause_resume_test");
+    fs::create_dir_all(&folder_path).unwrap();
+
+    let conn = setup_test_db();
+    let folder_path_str = folder_path.to_string_lossy().to_string();
+    conn.execute(
+        "INSERT INTO folders (id, path, enabled, recursive) VALUES (1, ?1, 1, 1)",
+        [&folder_path_str],
+    )
+    .unwrap();
+
+    let db = Database {
+        conn: Arc::new(std::sync::Mutex::new(conn)),
+    };
+
+    let engine = Arc::new(MockOcrEngine::new("processed after resume"));
+    let watcher = WatcherManager::new(db.clone());
+    let service = IndexingService::new(db.clone(), engine, watcher);
+
+    // 1. Pause indexing BEFORE starting worker
+    service.pause();
+    assert!(service.is_paused());
+
+    service.start(None);
+
+    // 2. Add 2 screenshot files into the watched directory while paused
+    for i in 1..=2 {
+        let p = folder_path.join(format!("burst_{i}.png"));
+        let mut f = File::create(&p).unwrap();
+        f.write_all(format!("image bytes {i}").as_bytes()).unwrap();
+
+        // Enqueue directly through service debouncer/queue mechanism
+        let conn_guard = db.conn.lock().unwrap();
+        let path_str = p.to_string_lossy().to_string();
+        let key = format!("UPSERT:1:{path_str}:hash_{i}");
+        jobs::enqueue_job(&conn_guard, 1, &path_str, JOB_TYPE_UPSERT, &key).unwrap();
+    }
+
+    // Wait 500ms while paused
+    thread::sleep(Duration::from_millis(500));
+
+    // 3. While paused: jobs must remain in index_jobs as PENDING, worker must claim 0 jobs
+    {
+        let conn_guard = db.conn.lock().unwrap();
+        let stats = jobs::get_job_stats(&conn_guard).unwrap();
+        assert_eq!(
+            stats.pending, 2,
+            "Backlog must accumulate in PENDING while paused"
+        );
+        assert_eq!(
+            stats.processing, 0,
+            "Worker must not claim jobs while paused"
+        );
+        assert_eq!(
+            stats.succeeded, 0,
+            "No jobs should be completed while paused"
+        );
+    }
+
+    // 4. Resume indexing
+    service.resume();
+    assert!(!service.is_paused());
+
+    // Wait up to 3 seconds for worker to drain the backlog
+    let mut drained = false;
+    for _ in 0..30 {
+        thread::sleep(Duration::from_millis(100));
+        let conn_guard = db.conn.lock().unwrap();
+        let stats = jobs::get_job_stats(&conn_guard).unwrap();
+        if stats.succeeded == 2 && stats.pending == 0 {
+            drained = true;
+            break;
+        }
+    }
+
+    assert!(
+        drained,
+        "Worker must automatically drain accumulated backlog after resume"
+    );
+
+    // Verify search works for both items
+    {
+        let conn_guard = db.conn.lock().unwrap();
+        let res = search_screenshots(
+            &conn_guard,
+            &SearchRequest {
+                query: "processed".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(res.total_matches, 2);
+    }
+
+    service.shutdown();
+}
+
+#[test]
+fn test_watcher_and_startup_reconciliation_race_safety() {
+    let dir = tempdir().unwrap();
+    let folder_path = dir.path().join("race_safety_test");
+    fs::create_dir_all(&folder_path).unwrap();
+
+    let test_file = folder_path.join("concurrent_drop.png");
+    {
+        let mut f = File::create(&test_file).unwrap();
+        f.write_all(b"race safety image content").unwrap();
+    }
+
+    let conn = setup_test_db();
+    let folder_path_str = folder_path.to_string_lossy().to_string();
+    conn.execute(
+        "INSERT INTO folders (id, path, enabled, recursive) VALUES (1, ?1, 1, 1)",
+        [&folder_path_str],
+    )
+    .unwrap();
+
+    let db = Database {
+        conn: Arc::new(std::sync::Mutex::new(conn)),
+    };
+
+    let engine = Arc::new(MockOcrEngine::new("token_race_safe"));
+    let watcher = WatcherManager::new(db.clone());
+    let service = IndexingService::new(db.clone(), engine, watcher);
+
+    // Simulate concurrent discovery:
+    // Thread A: Watcher debouncer enqueues the file
+    // Thread B: Startup reconciliation scans the folder and enqueues the file
+    let file_str = test_file.to_string_lossy().to_string();
+    let key = format!("UPSERT:1:{file_str}:hash_shared");
+
+    let db_a = db.clone();
+    let file_a = file_str.clone();
+    let key_a = key.clone();
+    let handle_a = thread::spawn(move || {
+        let conn_a = db_a.conn.lock().unwrap();
+        jobs::enqueue_job(&conn_a, 1, &file_a, JOB_TYPE_UPSERT, &key_a)
+    });
+
+    let db_b = db.clone();
+    let file_b = file_str.clone();
+    let key_b = key.clone();
+    let handle_b = thread::spawn(move || {
+        let conn_b = db_b.conn.lock().unwrap();
+        jobs::enqueue_job(&conn_b, 1, &file_b, JOB_TYPE_UPSERT, &key_b)
+    });
+
+    let res_a = handle_a.join().unwrap().unwrap();
+    let res_b = handle_b.join().unwrap().unwrap();
+
+    // Exactly one thread inserted a new job; the other was cleanly deduplicated
+    let inserts = [res_a, res_b].iter().filter(|r| r.is_some()).count();
+    assert_eq!(
+        inserts, 1,
+        "Exactly one thread should enqueue; concurrent duplicate must be rejected"
+    );
+
+    // Run worker for the job
+    let conn_guard = db.conn.lock().unwrap();
+    let job = jobs::claim_next_job(&conn_guard, 60).unwrap().unwrap();
+    let mock_eng = MockOcrEngine::new("token_race_safe");
+    let shot_id =
+        crate::indexing::worker::run_indexing_worker_loop_step(&conn_guard, &mock_eng, &job)
+            .unwrap();
+    jobs::complete_job(&conn_guard, job.id, shot_id).unwrap();
+
+    // Verify search has exactly 1 match
+    let res = search_screenshots(
+        &conn_guard,
+        &SearchRequest {
+            query: "token_race_safe".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res.total_matches, 1);
+
+    // Verify screenshots table has exactly 1 row
+    let count: i64 = conn_guard
+        .query_row("SELECT COUNT(*) FROM screenshots", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+
+    service.shutdown();
+}
+
+#[test]
+fn test_burst_copy_fifty_plus_images() {
+    let dir = tempdir().unwrap();
+    let folder_path = dir.path().join("burst_folder");
+    fs::create_dir_all(&folder_path).unwrap();
+
+    let conn = setup_test_db();
+    let folder_path_str = folder_path.to_string_lossy().to_string();
+    conn.execute(
+        "INSERT INTO folders (id, path, enabled, recursive) VALUES (1, ?1, 1, 1)",
+        [&folder_path_str],
+    )
+    .unwrap();
+
+    let db = Database {
+        conn: Arc::new(std::sync::Mutex::new(conn)),
+    };
+
+    let engine = Arc::new(MockOcrEngine::new("burst_token_found"));
+    let watcher = WatcherManager::new(db.clone());
+    let service = IndexingService::new(db.clone(), engine, watcher);
+
+    service.start(None);
+
+    // Burst copy 55 screenshots into the watched directory in a tight loop
+    const BURST_COUNT: usize = 55;
+    for i in 1..=BURST_COUNT {
+        let p = folder_path.join(format!("burst_shot_{i:03}.png"));
+        let mut f = File::create(&p).unwrap();
+        f.write_all(format!("burst image content {i}").as_bytes())
+            .unwrap();
+
+        // Enqueue directly via queue to simulate watcher burst completion
+        let conn_guard = db.conn.lock().unwrap();
+        let path_str = p.to_string_lossy().to_string();
+        let key = format!("UPSERT:1:{path_str}:hash_{i}");
+        jobs::enqueue_job(&conn_guard, 1, &path_str, JOB_TYPE_UPSERT, &key).unwrap();
+    }
+
+    // Wait for the single-flight worker to drain all 55 jobs
+    let mut all_completed = false;
+    for _ in 0..100 {
+        thread::sleep(Duration::from_millis(50));
+        let conn_guard = db.conn.lock().unwrap();
+        let stats = jobs::get_job_stats(&conn_guard).unwrap();
+        if stats.succeeded == BURST_COUNT && stats.pending == 0 {
+            all_completed = true;
+            break;
+        }
+    }
+
+    assert!(
+        all_completed,
+        "Worker must complete all 55 burst jobs without dropping or stalling"
+    );
+
+    // Verify search matches all 55 screenshots
+    {
+        let conn_guard = db.conn.lock().unwrap();
+        let res = search_screenshots(
+            &conn_guard,
+            &SearchRequest {
+                query: "burst_token".into(),
+                limit: Some(100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(res.total_matches, BURST_COUNT);
+    }
+
+    service.shutdown();
+}

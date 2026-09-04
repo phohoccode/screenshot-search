@@ -140,25 +140,31 @@ pub fn start_debouncer_thread(
                             from_path,
                             to_path,
                         } => {
-                            // Split rename into Remove(from) and Upsert(to)
-                            pending_map.insert(
-                                from_path.clone(),
-                                CoalescedEvent {
-                                    folder_id,
-                                    path: from_path,
-                                    is_remove: true,
-                                    deadline: Instant::now() + DEBOUNCE_WINDOW,
-                                },
-                            );
-                            pending_map.insert(
-                                to_path.clone(),
-                                CoalescedEvent {
-                                    folder_id,
-                                    path: to_path,
-                                    is_remove: false,
-                                    deadline: Instant::now() + DEBOUNCE_WINDOW,
-                                },
-                            );
+                            // Cancel any pending coalesced events for from_path
+                            pending_map.remove(&from_path);
+
+                            // Attempt atomic in-place rename in SQLite
+                            let renamed = if let Ok(conn) = db.conn.lock() {
+                                crate::db::screenshots::rename_screenshot(
+                                    &conn, folder_id, &from_path, &to_path,
+                                )
+                                .unwrap_or(false)
+                            } else {
+                                false
+                            };
+
+                            if !renamed {
+                                // from_path was not in DB yet: enqueue to_path for discovery/indexing
+                                pending_map.insert(
+                                    to_path.clone(),
+                                    CoalescedEvent {
+                                        folder_id,
+                                        path: to_path,
+                                        is_remove: false,
+                                        deadline: Instant::now() + DEBOUNCE_WINDOW,
+                                    },
+                                );
+                            }
                         }
                     }
                 }

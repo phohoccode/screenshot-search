@@ -72,7 +72,14 @@ pub fn enqueue_job(
         return Ok(None);
     }
 
-    // Insert or re-activate failed job
+    // Cancel/supersede any obsolete PENDING job for the same path with a different dedupe_key
+    let _ = conn.execute(
+        "DELETE FROM index_jobs 
+         WHERE folder_id = ?1 AND path = ?2 AND status = 'PENDING' AND dedupe_key != ?3",
+        params![folder_id, path, dedupe_key],
+    );
+
+    // Insert new job or re-open previously completed/failed job
     let mut stmt = conn
         .prepare(
             "INSERT INTO index_jobs (folder_id, path, job_type, dedupe_key, status, available_at, updated_at)
@@ -84,8 +91,9 @@ pub fn enqueue_job(
                  lease_until = NULL,
                  last_error_code = NULL,
                  last_error_message = NULL,
+                 completed_at = NULL,
                  updated_at = datetime('now')
-             WHERE status = 'FAILED'
+             WHERE status IN ('FAILED', 'SUCCEEDED')
              RETURNING id",
         )
         .map_err(|e| AppError::database(format!("Failed to prepare enqueue statement: {e}")))?;

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -503,4 +503,89 @@ pub fn get_ocr_stats(conn: &Connection) -> Result<OcrStats, AppError> {
         .map_err(|e| AppError::database(format!("Failed to query OCR stats: {e}")))?;
 
     Ok(stats)
+}
+
+/// Atomically renames a screenshot record in `screenshots` and `screenshots_fts` from `from_path` to `to_path`.
+/// Returns Ok(true) if the record was found and renamed, or Ok(false) if from_path was not registered.
+pub fn rename_screenshot(
+    conn: &Connection,
+    folder_id: i64,
+    from_path: &str,
+    to_path: &str,
+) -> Result<bool, AppError> {
+    let existing_opt = get_screenshot_by_path(conn, from_path)?;
+    let existing = match existing_opt {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+
+    let to_path_obj = std::path::Path::new(to_path);
+    let new_filename = to_path_obj
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(to_path);
+    let new_extension = to_path_obj
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // 1. Update screenshots record with new path, filename, and extension
+    conn.execute(
+        "UPDATE screenshots 
+         SET path = ?1, filename = ?2, extension = ?3, updated_at = datetime('now')
+         WHERE id = ?4",
+        params![to_path, new_filename, new_extension, existing.id],
+    )
+    .map_err(|e| AppError::database(format!("Failed to rename screenshot path: {e}")))?;
+
+    // 2. Synchronize FTS5 filename
+    let _ = conn.execute(
+        "UPDATE screenshots_fts SET filename = ?1 WHERE rowid = ?2",
+        params![new_filename, existing.id],
+    );
+
+    // 3. Remove any pending DELETE job for from_path in index_jobs
+    let _ = conn.execute(
+        "DELETE FROM index_jobs WHERE folder_id = ?1 AND path = ?2 AND job_type = 'DELETE_SCREENSHOT'",
+        params![folder_id, from_path],
+    );
+
+    log::info!(
+        "Atomically renamed screenshot record {}: {} -> {}",
+        existing.id,
+        from_path,
+        to_path
+    );
+
+    Ok(true)
+}
+
+/// Queries a screenshot by its folder_id and content_hash.
+pub fn get_screenshot_by_hash(
+    conn: &Connection,
+    folder_id: i64,
+    content_hash: &str,
+) -> Result<Option<ScreenshotDetail>, AppError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT 
+                id, folder_id, path, filename, extension, file_size, 
+                modified_at_fs, content_hash, width, height, ocr_text, ocr_status, 
+                ocr_engine, indexed_at
+             FROM screenshots 
+             WHERE folder_id = ?1 AND content_hash = ?2
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .map_err(|e| {
+            AppError::database(format!("Failed to prepare get_screenshot_by_hash: {e}"))
+        })?;
+
+    let result = stmt
+        .query_row(params![folder_id, content_hash], map_screenshot_detail_row)
+        .optional()
+        .map_err(|e| AppError::database(format!("Failed to query screenshot by hash: {e}")))?;
+
+    Ok(result)
 }

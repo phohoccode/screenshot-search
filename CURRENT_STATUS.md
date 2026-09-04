@@ -31,10 +31,11 @@ The automatic, zero-manual-intervention background indexing pipeline is now comp
 
 - `cargo fmt --check` → **PASS** (0 formatting diffs across `src-tauri/`)
 - `cargo check --manifest-path ./src-tauri/Cargo.toml` → **PASS** (Clean compilation, 0 errors, 0 warnings)
-- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**55 passed**; 0 failed; finished in 0.77s)
+- `cargo test --manifest-path ./src-tauri/Cargo.toml` → **PASS** (**60 passed**; 0 failed; finished in 1.04s)
 - `npm run typecheck` → **PASS** (0 TypeScript errors in `src/`)
-- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.28s)
-- `npm run tauri dev` → **PASS** (Application booted, Migration v3 completed, background worker and watcher active, startup scan executed in 3ms)
+- `npm run build` → **PASS** (Vite v6 production bundle built successfully in 3.72s)
+- `npm run tauri dev` → **PASS** (Application booted, Migration v3 completed, background worker and watcher active, startup scan executed in 4ms)
+- **Reliability Edge Cases Hardened** → **PASS** (Dedupe re-enqueueing within 24h, atomic rename in-place without duplicate records, pause/resume backlog accumulation & drain, watcher + startup reconciliation race safety, burst copy 50+ images)
 - **Micro-Hardening (Cache & Zero-Network)** → **PASS** (Preview URL includes `?v=<content_hash>`, external `placehold.co` removed from CSP and code in favor of local inline SVG)
 
 ---

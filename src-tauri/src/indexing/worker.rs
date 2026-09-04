@@ -79,18 +79,32 @@ fn process_upsert_job(
             }
         }
         None => {
-            // New screenshot: insert with ocr_status = 'PENDING'
-            let new_id = screenshots::insert_screenshot(
-                conn,
-                job.folder_id,
-                &job.path,
-                &meta.filename,
-                &meta.extension,
-                meta.file_size,
-                &meta.modified_at_fs,
-                &content_hash,
-            )?;
-            (new_id, true)
+            // Check if this is a rename/move of an existing screenshot whose file on disk no longer exists
+            let renamed_candidate =
+                screenshots::get_screenshot_by_hash(conn, job.folder_id, &content_hash)
+                    .ok()
+                    .flatten()
+                    .filter(|candidate| !Path::new(&candidate.path).exists());
+
+            if let Some(existing) = renamed_candidate {
+                // Migrate the existing screenshot record to the new path in-place
+                screenshots::rename_screenshot(conn, job.folder_id, &existing.path, &job.path)?;
+                let needs_ocr = existing.ocr_status != "SUCCEEDED";
+                (existing.id, needs_ocr)
+            } else {
+                // Genuinely new screenshot: insert with ocr_status = 'PENDING'
+                let new_id = screenshots::insert_screenshot(
+                    conn,
+                    job.folder_id,
+                    &job.path,
+                    &meta.filename,
+                    &meta.extension,
+                    meta.file_size,
+                    &meta.modified_at_fs,
+                    &content_hash,
+                )?;
+                (new_id, true)
+            }
         }
     };
 
